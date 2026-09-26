@@ -28,10 +28,69 @@ import type {
   BootstrapState,
   ProviderLocalUsageSummary,
   ProviderUsageSnapshot,
+  RateWindowSnapshot,
   SettingsSnapshot,
 } from "../types/bridge";
 import { FLOAT_BAR_CONFIG_CHANGED_EVENT, resizeFloatBar } from "./api";
 import "./FloatBar.css";
+
+const CODEX_PROVIDER_ID = "codex";
+const CLAUDE_PROVIDER_ID = "claude";
+/** Providers rendered as quota cards, stacked top-to-bottom in this order. */
+const QUOTA_CARD_PROVIDER_IDS = [CLAUDE_PROVIDER_ID, CODEX_PROVIDER_ID];
+const WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, value));
+}
+
+function pixelAlignedMeterHeights(scale: number): {
+  meter: number;
+  expected: number;
+  gap: number;
+} {
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const meterDevicePixels = Math.max(1, Math.round(4 * scale * dpr));
+  return {
+    meter: meterDevicePixels / dpr,
+    expected: meterDevicePixels / dpr,
+    gap: 1 / dpr,
+  };
+}
+
+function expectedRemainingPercent(window: RateWindowSnapshot): number | null {
+  if (!window.windowMinutes || window.windowMinutes <= 0 || !window.resetsAt) {
+    return null;
+  }
+
+  const resetsAt = Date.parse(window.resetsAt);
+  if (Number.isNaN(resetsAt)) return null;
+
+  const windowMs = window.windowMinutes * 60_000;
+  const remainingMs = resetsAt - Date.now();
+  return clampPercent((remainingMs / windowMs) * 100);
+}
+
+function formatResetDetail(text: string | null): string | null {
+  const trimmed = text?.trim();
+  if (!trimmed) return null;
+  if (/^resets?\s+in\b/i.test(trimmed)) {
+    return trimmed.replace(/^resets?\s+in\s*/i, "");
+  }
+  if (/^(resetting|resets?\s+now|now)$/i.test(trimmed)) return "now";
+  return trimmed;
+}
+
+function isEmptyRateWindow(window: RateWindowSnapshot): boolean {
+  return (
+    window.usedPercent === 0 &&
+    window.remainingPercent === 100 &&
+    !window.windowMinutes &&
+    !window.resetsAt &&
+    !window.resetDescription &&
+    !window.isExhausted
+  );
+}
 
 function ResetIcon({ size }: { size: number }) {
   return (
@@ -144,7 +203,7 @@ function CostPill({
   return (
     <div
       className="floatbar__cost-pill"
-      title={`${summary.displayName}: ${title} (${estimateLabel})`}
+      aria-label={`${summary.displayName}: ${title} (${estimateLabel})`}
       data-tauri-drag-region
       style={{ "--brand": brand } as CSSProperties}
     >
@@ -257,7 +316,7 @@ function ProviderPill({
   return (
     <div
       className={`floatbar__pill floatbar__pill--${tone}`}
-      title={
+      aria-label={
         state.isProblem
           ? `${provider.displayName}: ${stateLabel}`
           : informational
@@ -293,6 +352,121 @@ function ProviderPill({
           </span>
         )}
       </span>
+    </div>
+  );
+}
+
+function CodexLimitRow({
+  window,
+  edge,
+}: {
+  window: RateWindowSnapshot;
+  edge: "top" | "bottom";
+}) {
+  const remaining = clampPercent(window.remainingPercent);
+  const resetText = useFormattedResetTime(
+    window.resetsAt,
+    window.resetDescription,
+    true,
+  );
+  const resetDetail = formatResetDetail(resetText);
+  const expectedRemaining = expectedRemainingPercent(window);
+
+  return (
+    <div
+      className="floatbar__codex-row"
+      data-tauri-drag-region
+    >
+      <span
+        className={`floatbar__codex-meter floatbar__codex-meter--${edge}`}
+        aria-hidden="true"
+      >
+        <span
+          className="floatbar__codex-meter-fill"
+          style={{ width: `${remaining}%` }}
+        />
+      </span>
+      {expectedRemaining !== null && (
+        <span
+          className={`floatbar__codex-expected floatbar__codex-expected--${edge}`}
+          aria-hidden="true"
+        >
+          <span
+            className="floatbar__codex-expected-fill"
+            style={{ width: `${expectedRemaining}%` }}
+          />
+        </span>
+      )}
+      <span className="floatbar__codex-remaining">
+        {Math.round(remaining)}% left
+      </span>
+      {resetDetail && (
+        <span className="floatbar__codex-reset">{resetDetail}</span>
+      )}
+    </div>
+  );
+}
+
+function isQuotaCardProvider(provider: ProviderUsageSnapshot): boolean {
+  return QUOTA_CARD_PROVIDER_IDS.includes(provider.providerId);
+}
+
+function QuotaCard({
+  provider,
+}: {
+  provider: ProviderUsageSnapshot;
+}) {
+  const variantClass = ` floatbar__codex-card--${provider.providerId}`;
+  const brand = getProviderIcon(provider.providerId).brandColor;
+  // During weekly-only periods the API can move the weekly limit into the
+  // primary slot and leave a null secondary slot behind. Older cached
+  // snapshots represent that null as an empty 100%-remaining window.
+  const secondary =
+    provider.primary.windowMinutes !== null &&
+    provider.primary.windowMinutes >= WEEKLY_WINDOW_MINUTES &&
+    provider.secondary &&
+    isEmptyRateWindow(provider.secondary)
+      ? null
+      : provider.secondary;
+
+  if (describeProviderState(provider.errorState).isProblem) {
+    return (
+      <div
+        className={`floatbar__codex-card floatbar__codex-card--error${variantClass}`}
+        aria-label={`${provider.displayName}: ${provider.error}`}
+        style={{ "--brand": brand } as CSSProperties}
+        data-tauri-drag-region
+      >
+        <div className="floatbar__codex-limits" data-tauri-drag-region>
+          <div className="floatbar__codex-row">
+            <span className="floatbar__codex-remaining">
+              {provider.displayName} unavailable
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`floatbar__codex-card${variantClass}${secondary ? "" : " floatbar__codex-card--single"}`}
+      aria-label={`${provider.displayName} quota`}
+      style={{ "--brand": brand } as CSSProperties}
+      data-tauri-drag-region
+    >
+      <div className="floatbar__codex-limits" data-tauri-drag-region>
+        <CodexLimitRow
+          window={provider.primary}
+          edge="top"
+        />
+        {secondary && (
+          <CodexLimitRow
+            window={secondary}
+            edge="bottom"
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -443,6 +617,16 @@ export default function FloatBar({ state }: { state: BootstrapState }) {
   const visibleCostValuesKey = visibleCosts
     .map((summary) => `${summary.key}:${summary.todayCost ?? ""}:${summary.period ?? ""}:${summary.periodCost ?? ""}`)
     .join("|");
+  const layoutKey = visible
+    .map((p) => {
+      if (!isQuotaCardProvider(p)) return `${p.providerId}:pill`;
+      if (describeProviderState(p.errorState).isProblem) {
+        return `${p.providerId}:error`;
+      }
+      return `${p.providerId}:${p.secondary ? "two-rows" : "one-row"}`;
+    })
+    .join("|");
+
   // Keep the native floatbar window fitted when late data/fonts/icons change layout.
   const lastResizeRef = useRef<{ w: number; h: number } | null>(null);
   const resizeRafRef = useRef<number | null>(null);
@@ -477,6 +661,7 @@ export default function FloatBar({ state }: { state: BootstrapState }) {
     resizeToContent,
     visible.length,
     visibleCostValuesKey,
+    layoutKey,
     orientation,
     style,
     scale,
@@ -510,6 +695,14 @@ export default function FloatBar({ state }: { state: BootstrapState }) {
   const highRemaining = 100 - settings.highUsageThreshold;
   const critRemaining = 100 - settings.criticalUsageThreshold;
   const opacityFraction = Math.max(0.3, Math.min(1, settings.floatBarOpacity / 100));
+  const meterHeights = pixelAlignedMeterHeights(scale);
+
+  // Claude and Codex render as one stacked quota widget (Claude on top),
+  // placed where the first of them appears in the usage-sorted list.
+  const quotaCards = QUOTA_CARD_PROVIDER_IDS.flatMap((id) =>
+    visible.filter((p) => p.providerId === id),
+  );
+  const firstQuotaIndex = visible.findIndex(isQuotaCardProvider);
 
   return (
     <div
@@ -523,17 +716,32 @@ export default function FloatBar({ state }: { state: BootstrapState }) {
         {
           opacity: opacityFraction,
           "--floatbar-scale": scale,
+          "--codex-meter-height": `${meterHeights.meter}px`,
+          "--codex-expected-height": `${meterHeights.expected}px`,
+          "--codex-meter-gap": `${meterHeights.gap}px`,
         } as CSSProperties
       }
     >
-      <div className="floatbar__handle" data-tauri-drag-region aria-hidden />
       {visible.length === 0 ? (
         <div className="floatbar__empty" data-tauri-drag-region>
           {t("FloatBarNoProviders")}
         </div>
       ) : (
         <>
-          {visible.map((p) => (
+          {visible.map((p, index) =>
+            isQuotaCardProvider(p) ? (
+              index === firstQuotaIndex && (
+                <div
+                  key="quota-stack"
+                  className="floatbar__quota-stack"
+                  data-tauri-drag-region
+                >
+                  {quotaCards.map((card) => (
+                    <QuotaCard key={providerCostKey(card)} provider={card} />
+                  ))}
+                </div>
+              )
+            ) : (
             <ProviderPill
               key={providerCostKey(p)}
               provider={p}
@@ -547,7 +755,8 @@ export default function FloatBar({ state }: { state: BootstrapState }) {
               remainingSuffix={t("FloatBarRemainingSuffix")}
               stateLabel={t(describeProviderState(p.errorState).labelKey)}
             />
-          ))}
+            ),
+          )}
           {visibleCosts.map((summary) => (
             <CostPill
               key={`cost:${summary.key}`}

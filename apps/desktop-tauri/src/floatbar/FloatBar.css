@@ -7,15 +7,17 @@ html:has(body.floatbar-window) {
   background: transparent !important;
   margin: 0;
   padding: 0;
+  overflow: hidden;
 }
 body.floatbar-window #root {
   background: transparent !important;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 100vh;
+  display: inline-flex;
+  width: max-content;
+  height: max-content;
+  min-height: 0;
   margin: 0;
   padding: 0;
+  overflow: hidden;
 }
 
 /* Container is fully transparent — the pills float individually so the
@@ -34,51 +36,17 @@ body.floatbar-window #root {
   user-select: none;
   width: max-content;
   height: max-content;
+  cursor: grab;
+  -webkit-app-region: drag;
+}
+.floatbar * {
+  cursor: grab;
+  -webkit-app-region: drag;
 }
 .floatbar--vertical {
   flex-direction: column;
   align-items: center;
   gap: calc(3px * var(--floatbar-scale, 1));
-}
-/* Compact line grip, matching the small handle affordance in Windows taskbar
- * widgets while still giving the user a clear drag target. */
-.floatbar__handle {
-  width: calc(10px * var(--floatbar-scale, 1));
-  height: calc(16px * var(--floatbar-scale, 1));
-  flex-shrink: 0;
-  cursor: grab;
-  border-radius: calc(3px * var(--floatbar-scale, 1));
-  background-color: transparent;
-  background-image:
-    repeating-linear-gradient(
-      to bottom,
-      rgba(25, 47, 60, 0.68) 0,
-      rgba(25, 47, 60, 0.68) 1px,
-      transparent 1px,
-      transparent calc(4px * var(--floatbar-scale, 1))
-    );
-  background-size: calc(8px * var(--floatbar-scale, 1)) calc(12px * var(--floatbar-scale, 1));
-  background-position: center;
-  background-repeat: no-repeat;
-  opacity: 0.85;
-  transition: opacity 120ms ease, background-color 120ms ease;
-}
-.floatbar__handle:hover {
-  opacity: 1;
-  background-color: rgba(255, 255, 255, 0.22);
-}
-.floatbar--vertical .floatbar__handle {
-  width: calc(16px * var(--floatbar-scale, 1));
-  height: calc(10px * var(--floatbar-scale, 1));
-  background-image:
-    repeating-linear-gradient(
-      to right,
-      rgba(25, 47, 60, 0.68) 0,
-      rgba(25, 47, 60, 0.68) 1px,
-      transparent 1px,
-      transparent calc(4px * var(--floatbar-scale, 1))
-    );
-  background-size: calc(12px * var(--floatbar-scale, 1)) calc(8px * var(--floatbar-scale, 1));
 }
 .floatbar__pill {
   display: inline-flex;
@@ -98,7 +66,7 @@ body.floatbar-window #root {
   cursor: grab;
 }
 .floatbar__pill *,
-.floatbar__cost-pill *,
+.floatbar__codex-card *,
 .floatbar__handle *,
 .floatbar__empty * {
   pointer-events: none;
@@ -115,51 +83,6 @@ body.floatbar-window #root {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-}
-.floatbar__cost-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: calc(4px * var(--floatbar-scale, 1));
-  min-height: calc(16px * var(--floatbar-scale, 1));
-  padding: calc(1px * var(--floatbar-scale, 1)) calc(6px * var(--floatbar-scale, 1));
-  border-radius: calc(7px * var(--floatbar-scale, 1));
-  background: rgba(213, 231, 242, 0.74);
-  backdrop-filter: blur(16px) saturate(145%);
-  -webkit-backdrop-filter: blur(16px) saturate(145%);
-  border: 1px solid var(--brand, rgba(255, 255, 255, 0.48));
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.58),
-    0 1px 2px rgba(14, 42, 62, 0.22);
-  white-space: nowrap;
-  cursor: grab;
-}
-.floatbar__cost-items {
-  display: inline-flex;
-  align-items: center;
-  gap: calc(5px * var(--floatbar-scale, 1));
-  line-height: 1;
-}
-.floatbar__cost-item {
-  display: inline-flex;
-  align-items: baseline;
-  gap: calc(2px * var(--floatbar-scale, 1));
-  font-variant-numeric: tabular-nums;
-}
-.floatbar__cost-label {
-  font-size: 0.78em;
-  font-weight: 600;
-  opacity: 0.66;
-}
-.floatbar__cost-value {
-  font-weight: 700;
-}
-.floatbar--vertical .floatbar__cost-pill {
-  flex-direction: column;
-  gap: calc(2px * var(--floatbar-scale, 1));
-}
-.floatbar--vertical .floatbar__cost-items {
-  flex-direction: column;
-  gap: calc(2px * var(--floatbar-scale, 1));
 }
 .floatbar__pill--warn {
   background: rgba(250, 221, 171, 0.84);
@@ -212,6 +135,106 @@ body.floatbar-window #root {
   align-items: center;
   gap: calc(1px * var(--floatbar-scale, 1));
 }
+.floatbar__codex-card {
+  display: inline-flex;
+  align-items: stretch;
+  position: relative;
+  min-width: 0;
+  min-height: calc(34px * var(--floatbar-scale, 1));
+  padding: calc(8px * var(--floatbar-scale, 1)) calc(11px * var(--floatbar-scale, 1));
+  border-radius: 0;
+  color: rgba(255, 255, 255, 0.90);
+  font: 600 calc(10px * var(--floatbar-scale, 1))/1.25 -apple-system, system-ui, "Segoe UI", sans-serif;
+  background: #000;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  cursor: grab;
+  overflow: hidden;
+}
+.floatbar__codex-card--error {
+  min-width: 0;
+}
+.floatbar__codex-card--single {
+  padding-top: calc((8px * var(--floatbar-scale, 1)) + var(--codex-meter-height, 4px));
+  padding-bottom: calc((8px * var(--floatbar-scale, 1)) - var(--codex-meter-height, 4px));
+}
+.floatbar__codex-limits {
+  display: grid;
+  gap: calc(3px * var(--floatbar-scale, 1));
+  min-width: 0;
+  width: max-content;
+}
+.floatbar__codex-row {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  align-items: center;
+  column-gap: calc(24px * var(--floatbar-scale, 1));
+  min-height: calc(14px * var(--floatbar-scale, 1));
+  white-space: nowrap;
+}
+.floatbar__codex-remaining,
+.floatbar__codex-reset {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.floatbar__codex-meter {
+  position: absolute;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: var(--codex-meter-height, 4px);
+  overflow: hidden;
+  border-radius: 0;
+  background: #000;
+  pointer-events: none;
+}
+.floatbar__codex-meter--top {
+  top: 0;
+}
+.floatbar__codex-meter--bottom {
+  bottom: 0;
+}
+.floatbar__codex-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 0;
+  background: #72e6a6;
+}
+.floatbar__codex-expected {
+  position: absolute;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: var(--codex-expected-height, 2px);
+  overflow: hidden;
+  border-radius: 0;
+  pointer-events: none;
+}
+.floatbar__codex-expected--top {
+  top: calc(var(--codex-meter-height, 4px) + var(--codex-meter-gap, 1px));
+}
+.floatbar__codex-expected--bottom {
+  bottom: calc(var(--codex-meter-height, 4px) + var(--codex-meter-gap, 1px));
+}
+.floatbar__codex-expected-fill {
+  display: block;
+  height: 100%;
+  border-radius: 0;
+  background: #ffad6b;
+}
+.floatbar__codex-remaining {
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.floatbar__codex-reset {
+  color: inherit;
+  font: inherit;
+  letter-spacing: 0;
+}
 .floatbar__empty {
   display: inline-flex;
   align-items: center;
@@ -233,7 +256,6 @@ body.floatbar-window #root {
   color: rgba(20, 22, 26, 0.95);
 }
 .floatbar--light-bg .floatbar__pill,
-.floatbar--light-bg .floatbar__cost-pill,
 .floatbar--light-bg .floatbar__empty {
   background: rgba(248, 252, 255, 0.82);
   border-color: rgba(255, 255, 255, 0.64);
@@ -246,6 +268,15 @@ body.floatbar-window #root {
 .floatbar--light-bg .floatbar__pill--crit {
   border-color: #b91c1c;
   color: #991b1b;
+}
+.floatbar--light-bg .floatbar__codex-card {
+  color: rgba(255, 255, 255, 0.90);
+  background: #000;
+  border: 0;
+  box-shadow: none;
+}
+.floatbar--light-bg .floatbar__codex-meter {
+  background: #000;
 }
 .floatbar--light-bg .floatbar__handle {
   background-color: transparent;
@@ -294,8 +325,7 @@ body.floatbar-window #root {
     radial-gradient(circle, rgba(255, 255, 255, 0.7) 1px, transparent 1.5px);
   background-size: calc(4px * var(--floatbar-scale, 1)) calc(3px * var(--floatbar-scale, 1));
 }
-.floatbar--floating .floatbar__pill,
-.floatbar--floating .floatbar__cost-pill {
+.floatbar--floating .floatbar__pill {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   backdrop-filter: blur(14px) saturate(140%);
@@ -323,7 +353,6 @@ body.floatbar-window #root {
   color: rgba(20, 22, 26, 0.95);
 }
 .floatbar--floating.floatbar--light-bg .floatbar__pill,
-.floatbar--floating.floatbar--light-bg .floatbar__cost-pill,
 .floatbar--floating.floatbar--light-bg .floatbar__empty {
   background: rgba(255, 255, 255, 0.55);
   border-color: var(--brand, rgba(20, 22, 26, 0.25));
@@ -344,4 +373,36 @@ body.floatbar-window #root {
 }
 .floatbar--floating.floatbar--light-bg .floatbar__handle:hover {
   background-color: rgba(20, 22, 26, 0.18);
+}
+
+/* ── Stacked quota cards (Claude above Codex) ──────────────────────── */
+.floatbar__quota-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+.floatbar__quota-stack > .floatbar__codex-card {
+  display: flex;
+}
+.floatbar__quota-stack .floatbar__codex-limits {
+  width: 100%;
+}
+.floatbar__quota-stack .floatbar__codex-row {
+  grid-template-columns: minmax(max-content, 1fr) max-content;
+}
+
+/* Claude card uses Anthropic's palette: ivory surface, near-black text,
+ * Claude orange meters, and Anthropic blue for the expected-pace line. */
+.floatbar .floatbar__codex-card--claude:not(.floatbar__codex-card--error) {
+  color: #141413;
+  background: #f0eee6;
+}
+.floatbar .floatbar__codex-card--claude .floatbar__codex-meter {
+  background: #e3dacc;
+}
+.floatbar__codex-card--claude .floatbar__codex-meter-fill {
+  background: #d97757;
+}
+.floatbar__codex-card--claude .floatbar__codex-expected-fill {
+  background: #6a9bcc;
 }
