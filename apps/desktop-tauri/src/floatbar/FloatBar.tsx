@@ -361,7 +361,7 @@ function CodexLimitRow({
   edge,
 }: {
   window: RateWindowSnapshot;
-  edge: "top" | "bottom";
+  edge: "top" | "inline";
 }) {
   const remaining = clampPercent(window.remainingPercent);
   const resetText = useFormattedResetTime(
@@ -374,7 +374,7 @@ function CodexLimitRow({
 
   return (
     <div
-      className="floatbar__codex-row"
+      className={`floatbar__codex-row floatbar__codex-row--${edge}`}
       data-tauri-drag-region
     >
       <span
@@ -463,7 +463,7 @@ function QuotaCard({
     >
       <div className="floatbar__codex-limits" data-tauri-drag-region>
         {top && <CodexLimitRow window={top} edge="top" />}
-        {bottom && <CodexLimitRow window={bottom} edge="bottom" />}
+        {bottom && <CodexLimitRow window={bottom} edge="inline" />}
       </div>
     </div>
   );

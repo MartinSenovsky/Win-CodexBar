@@ -343,7 +343,7 @@ describe("FloatBar", () => {
           true,
         );
         expect(
-          meters[1].classList.contains("floatbar__codex-meter--bottom"),
+          meters[1].classList.contains("floatbar__codex-meter--inline"),
         ).toBe(true);
         expect(
           meters[0]
@@ -366,7 +366,7 @@ describe("FloatBar", () => {
         ).toBe(true);
         expect(
           expectedMarkers[1].classList.contains(
-            "floatbar__codex-expected--bottom",
+            "floatbar__codex-expected--inline",
           ),
         ).toBe(true);
         const expectedWidths = Array.from(expectedMarkers).map((marker) =>
@@ -408,7 +408,7 @@ describe("FloatBar", () => {
         expect(card?.querySelectorAll(".floatbar__codex-row")).toHaveLength(1);
         expect(card?.querySelectorAll(".floatbar__codex-meter")).toHaveLength(1);
         expect(card?.querySelector(".floatbar__codex-meter--top")).not.toBeNull();
-        expect(card?.querySelector(".floatbar__codex-meter--bottom")).toBeNull();
+        expect(card?.querySelector(".floatbar__codex-meter--inline")).toBeNull();
       });
     } finally {
       dateNow.mockRestore();

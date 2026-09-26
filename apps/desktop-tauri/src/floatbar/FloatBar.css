@@ -162,9 +162,9 @@ body.floatbar-window #root {
 }
 .floatbar__codex-limits {
   display: grid;
+  flex: 1 1 auto;
   gap: calc(3px * var(--floatbar-scale, 1));
-  min-width: 0;
-  width: max-content;
+  min-width: max-content;
 }
 .floatbar__codex-row {
   display: grid;
@@ -193,8 +193,20 @@ body.floatbar-window #root {
 .floatbar__codex-meter--top {
   top: 0;
 }
-.floatbar__codex-meter--bottom {
-  bottom: 0;
+/* The second (weekly) row carries its meters directly above its text,
+ * bleeding through the card's horizontal padding to both edges. */
+.floatbar__codex-row--inline {
+  --codex-inline-offset: calc(
+    var(--codex-meter-height, 4px) + var(--codex-meter-gap, 1px) +
+      var(--codex-expected-height, 2px) + (2px * var(--floatbar-scale, 1))
+  );
+  position: relative;
+  margin-top: var(--codex-inline-offset);
+}
+.floatbar__codex-meter--inline {
+  top: calc(-1 * var(--codex-inline-offset));
+  left: calc(-11px * var(--floatbar-scale, 1));
+  right: calc(-11px * var(--floatbar-scale, 1));
 }
 .floatbar__codex-meter-fill {
   display: block;
@@ -215,8 +227,13 @@ body.floatbar-window #root {
 .floatbar__codex-expected--top {
   top: calc(var(--codex-meter-height, 4px) + var(--codex-meter-gap, 1px));
 }
-.floatbar__codex-expected--bottom {
-  bottom: calc(var(--codex-meter-height, 4px) + var(--codex-meter-gap, 1px));
+.floatbar__codex-expected--inline {
+  left: calc(-11px * var(--floatbar-scale, 1));
+  right: calc(-11px * var(--floatbar-scale, 1));
+  top: calc(
+    var(--codex-meter-height, 4px) + var(--codex-meter-gap, 1px) -
+      var(--codex-inline-offset)
+  );
 }
 .floatbar__codex-expected-fill {
   display: block;
@@ -385,15 +402,8 @@ body.floatbar-window #root {
   display: flex;
 }
 
-/* Claude card uses Anthropic's palette: ivory surface, near-black text,
- * Claude orange meters, and Anthropic blue for the expected-pace line. */
-.floatbar .floatbar__codex-card--claude:not(.floatbar__codex-card--error) {
-  color: #141413;
-  background: #f0eee6;
-}
-.floatbar .floatbar__codex-card--claude .floatbar__codex-meter {
-  background: #e3dacc;
-}
+/* Claude card shares the black surface; Claude orange meters and
+ * Anthropic blue for the expected-pace line keep it distinguishable. */
 .floatbar__codex-card--claude .floatbar__codex-meter-fill {
   background: #d97757;
 }
