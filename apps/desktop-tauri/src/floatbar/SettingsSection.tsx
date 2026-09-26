@@ -7,6 +7,7 @@ import type {
   SettingsSnapshot,
   SettingsUpdate,
 } from "../types/bridge";
+import { centerFloatBar } from "./api";
 
 interface Props {
   settings: SettingsSnapshot;
@@ -45,6 +46,8 @@ function useDraftNumber(value: number) {
  */
 export default function FloatBarSettingsSection({ settings, saving, set }: Props) {
   const { t } = useLocale();
+  const [centering, setCentering] = useState(false);
+  const [centerError, setCenterError] = useState<string | null>(null);
   const opacity = useDraftNumber(settings.floatBarOpacity);
   const scale = useDraftNumber(settings.floatBarScale);
   const commitOpacity = () => {
@@ -52,6 +55,17 @@ export default function FloatBarSettingsSection({ settings, saving, set }: Props
   };
   const commitScale = () => {
     scale.commit(scale.draft, (value) => set({ floatBarScale: value }));
+  };
+  const centerOnScreen = async () => {
+    setCentering(true);
+    setCenterError(null);
+    try {
+      await centerFloatBar();
+    } catch (error) {
+      setCenterError(String(error));
+    } finally {
+      setCentering(false);
+    }
   };
 
   return (
@@ -96,6 +110,24 @@ export default function FloatBarSettingsSection({ settings, saving, set }: Props
             ]}
             onChange={(v) => set({ floatBarStyle: v as FloatBarStyle })}
           />
+        </Field>
+        <Field
+          label="Position"
+          description="Move the bar to the center of the screen it is currently on."
+        >
+          <button
+            type="button"
+            className="credential-btn"
+            disabled={saving || centering || !settings.floatBarEnabled}
+            onClick={centerOnScreen}
+          >
+            {centering ? "Centering…" : "Center on screen"}
+          </button>
+          {centerError && (
+            <span className="settings-inline-error" role="alert">
+              Could not center the floating bar.
+            </span>
+          )}
         </Field>
         <Field
           label={`${t("FloatBarOpacity")} (${opacity.draft}%)`}

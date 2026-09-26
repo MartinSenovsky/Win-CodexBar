@@ -324,6 +324,7 @@ fn main() {
             floatbar::set_float_bar_click_through,
             floatbar::resize_float_bar,
             floatbar::set_float_bar_orientation,
+            floatbar::center_float_bar,
         ])
         .setup(move |app| {
             if let Err(error) = codexbar::providers::claude::accounts::cleanup_abandoned_logins() {

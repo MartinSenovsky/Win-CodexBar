@@ -15,6 +15,11 @@ export function resizeFloatBar(width: number, height: number): Promise<void> {
   return invoke<void>("resize_float_bar", { width, height });
 }
 
+/** Center the bar on the usable area of the monitor it currently occupies. */
+export function centerFloatBar(): Promise<void> {
+  return invoke<void>("center_float_bar");
+}
+
 /** Window label used by the floatbar webview. */
 export const FLOATBAR_WINDOW_LABEL = "floatbar";
 

@@ -1,7 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { SettingsSnapshot } from "../types/bridge";
 import FloatBarSettingsSection from "./SettingsSection";
+
+const { centerFloatBar } = vi.hoisted(() => ({ centerFloatBar: vi.fn() }));
+vi.mock("./api", () => ({ centerFloatBar }));
 
 vi.mock("../hooks/useLocale", () => ({
   useLocale: () => ({ t: (key: string) => key }),
@@ -30,5 +33,28 @@ describe("FloatBar settings", () => {
     );
 
     expect(screen.getAllByText("FloatBarShowCost")).toHaveLength(1);
+  });
+
+  it("centers the open floating bar", async () => {
+    centerFloatBar.mockResolvedValueOnce(undefined);
+    render(
+      <FloatBarSettingsSection settings={settings} saving={false} set={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Center on screen" }));
+
+    await waitFor(() => expect(centerFloatBar).toHaveBeenCalledOnce());
+  });
+
+  it("disables centering while the floating bar is hidden", () => {
+    render(
+      <FloatBarSettingsSection
+        settings={{ ...settings, floatBarEnabled: false }}
+        saving={false}
+        set={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Center on screen" })).toBeDisabled();
   });
 });

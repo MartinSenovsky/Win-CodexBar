@@ -87,3 +87,11 @@ pub fn set_float_bar_orientation(app: AppHandle, orientation: String) -> Result<
     let _ = app.emit(super::FLOAT_BAR_CONFIG_CHANGED_EVENT, ());
     Ok(())
 }
+
+#[tauri::command]
+pub fn center_float_bar(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window(floatbar_window::FLOATBAR_LABEL)
+        .ok_or_else(|| "Floating bar is not open".to_string())?;
+    floatbar_window::center_on_current_monitor(&window)
+}

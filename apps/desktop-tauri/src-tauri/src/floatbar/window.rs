@@ -549,6 +549,35 @@ pub fn resize(
     Ok(())
 }
 
+/// Move the bar to the center of the usable area of its current monitor and
+/// persist the new placement. Physical coordinates keep this correct across
+/// mixed-DPI monitor layouts.
+pub fn center_on_current_monitor(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let monitor = window
+        .current_monitor()
+        .map_err(|e| e.to_string())?
+        .or_else(|| window.primary_monitor().ok().flatten())
+        .ok_or_else(|| "No monitor is available".to_string())?;
+    let work_area = monitor.work_area();
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let position = centered_position(work_area.position, work_area.size, size);
+    window.set_position(position).map_err(|e| e.to_string())?;
+    remember_geometry(window);
+    apply_no_activate(window);
+    apply_always_on_top(window);
+    Ok(())
+}
+
+fn centered_position(
+    origin: PhysicalPosition<i32>,
+    area: PhysicalSize<u32>,
+    window: PhysicalSize<u32>,
+) -> PhysicalPosition<i32> {
+    let x = origin.x + (area.width.saturating_sub(window.width) / 2) as i32;
+    let y = origin.y + (area.height.saturating_sub(window.height) / 2) as i32;
+    PhysicalPosition::new(x, y)
+}
+
 /// Re-assert native topmost ordering without activating the window.
 ///
 /// Tauri's `always_on_top(true)` sets the initial intent, but on Windows
@@ -870,6 +899,18 @@ mod tests {
         assert_eq!(
             default_logical_origin(0.0, 0.0, 1_920.0, 1_080.0, 211.0, 40.0, "taskbar"),
             (854.5, 1_032.0),
+        );
+    }
+
+    #[test]
+    fn centered_position_uses_work_area_and_handles_negative_monitor_origins() {
+        assert_eq!(
+            centered_position(
+                PhysicalPosition::new(-1920, 40),
+                PhysicalSize::new(1920, 1040),
+                PhysicalSize::new(360, 40),
+            ),
+            PhysicalPosition::new(-1140, 540),
         );
     }
 }

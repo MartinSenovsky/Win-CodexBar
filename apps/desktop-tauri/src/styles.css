@@ -5444,6 +5444,12 @@ html:has(.menu-surface--tray) {
   align-self: center;
 }
 
+.settings-inline-error {
+  margin-left: 8px;
+  color: var(--provider-status-error);
+  font-size: var(--font-caption);
+}
+
 /* Flat field stack: matches upstream SwiftUI VStack + Divider() per
    section. No card container, just a 1px divider between sibling
    fields (the divider rule below). */
