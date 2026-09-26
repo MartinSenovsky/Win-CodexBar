@@ -415,6 +415,26 @@ describe("FloatBar", () => {
     }
   });
 
+  it("hides the idle session placeholder and shows only the weekly row", async () => {
+    tauriMocks.getCachedProviders.mockResolvedValue([
+      snapshot("codex", "Codex", 0, {
+        informational: true,
+        resetDescription: "No active 5h session",
+        secondary: { used: 0, windowMinutes: 10080 },
+      }),
+    ]);
+    tauriMocks.getSettingsSnapshot.mockResolvedValue(settings());
+
+    const { container } = renderFloatBar(bootstrap());
+    await waitFor(() => {
+      const card = container.querySelector(".floatbar__codex-card");
+      expect(card?.classList.contains("floatbar__codex-card--single")).toBe(true);
+      expect(card?.querySelectorAll(".floatbar__codex-row")).toHaveLength(1);
+      expect(card?.querySelectorAll(".floatbar__codex-meter")).toHaveLength(1);
+      expect(card?.textContent).not.toContain("No active");
+    });
+  });
+
   it("keeps Codex meter rows state-neutral near the usage limit", async () => {
     tauriMocks.getCachedProviders.mockResolvedValue([
       snapshot("codex", "Codex", 95, {

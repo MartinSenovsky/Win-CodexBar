@@ -384,12 +384,6 @@ body.floatbar-window #root {
 .floatbar__quota-stack > .floatbar__codex-card {
   display: flex;
 }
-.floatbar__quota-stack .floatbar__codex-limits {
-  width: 100%;
-}
-.floatbar__quota-stack .floatbar__codex-row {
-  grid-template-columns: minmax(max-content, 1fr) max-content;
-}
 
 /* Claude card uses Anthropic's palette: ivory surface, near-black text,
  * Claude orange meters, and Anthropic blue for the expected-pace line. */

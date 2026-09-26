@@ -421,13 +421,19 @@ function QuotaCard({
   // During weekly-only periods the API can move the weekly limit into the
   // primary slot and leave a null secondary slot behind. Older cached
   // snapshots represent that null as an empty 100%-remaining window.
-  const secondary =
+  const staleSecondary =
     provider.primary.windowMinutes !== null &&
     provider.primary.windowMinutes >= WEEKLY_WINDOW_MINUTES &&
     provider.secondary &&
     isEmptyRateWindow(provider.secondary)
       ? null
       : provider.secondary;
+  // The backend fills an idle session slot with an informational
+  // placeholder ("No active 5h session"); only real limits get a row.
+  const [top, bottom = null] = [provider.primary, staleSecondary].filter(
+    (window): window is RateWindowSnapshot =>
+      window !== null && !window.isInformational,
+  );
 
   if (describeProviderState(provider.errorState).isProblem) {
     return (
@@ -450,22 +456,14 @@ function QuotaCard({
 
   return (
     <div
-      className={`floatbar__codex-card${variantClass}${secondary ? "" : " floatbar__codex-card--single"}`}
+      className={`floatbar__codex-card${variantClass}${bottom ? "" : " floatbar__codex-card--single"}`}
       aria-label={`${provider.displayName} quota`}
       style={{ "--brand": brand } as CSSProperties}
       data-tauri-drag-region
     >
       <div className="floatbar__codex-limits" data-tauri-drag-region>
-        <CodexLimitRow
-          window={provider.primary}
-          edge="top"
-        />
-        {secondary && (
-          <CodexLimitRow
-            window={secondary}
-            edge="bottom"
-          />
-        )}
+        {top && <CodexLimitRow window={top} edge="top" />}
+        {bottom && <CodexLimitRow window={bottom} edge="bottom" />}
       </div>
     </div>
   );
@@ -623,7 +621,7 @@ export default function FloatBar({ state }: { state: BootstrapState }) {
       if (describeProviderState(p.errorState).isProblem) {
         return `${p.providerId}:error`;
       }
-      return `${p.providerId}:${p.secondary ? "two-rows" : "one-row"}`;
+      return `${p.providerId}:${p.primary.isInformational ? "idle" : "active"}:${p.secondary ? "two-rows" : "one-row"}`;
     })
     .join("|");
 
