@@ -1,4 +1,24 @@
-# Win-CodexBar
+# Win-CodexBar — Claude + Codex floating bar fork
+
+> **Unofficial fork** of [Finesssee/Win-CodexBar](https://github.com/Finesssee/Win-CodexBar). It is not affiliated with or endorsed by the upstream maintainers, Anthropic, or OpenAI. All credit for the app goes to the upstream project; this fork only reworks the floating bar.
+
+<p align="center">
+  <img src="docs/images/floatbar.png" width="244" alt="Floating bar showing a Claude card (99% of the session left, resets in 16h 44m; 85% of the week left, resets in 4d 4h) above a Codex card (88% of the week left, resets in 3d 21h)"/>
+</p>
+
+This fork turns the always-on-top **floating bar** into a compact quota monitor for the two tools I use all day, Claude and Codex:
+
+- **Stacked quota cards.** Claude (on top, black card) and Codex (below) each get a card instead of a row of generic provider chips.
+- **Session and weekly windows.** Each card shows how much of the session and the weekly limit you have **left**, plus the time until that window resets.
+- **Remaining-capacity meters with a pace bar.** Under each meter, a thinner bar shows how much would be left if you used the quota at an even pace. When the main meter is shorter than the pace bar, you're burning quota faster than the window allows.
+- **No idle clutter.** When Codex has no active 5-hour session, the placeholder row is hidden and the card collapses to the weekly row only.
+- **Center on screen.** *Settings → Menu → Floating Bar* has a **Center on screen** button that moves the bar to the middle of whichever monitor it's on. Handy after unplugging a display.
+
+Everything else (providers, tray panel, settings, CLI) is unchanged from upstream. The Winget package and the release downloads below install the **upstream** app. To get this fork's floating bar, build from source; see [docs/BUILDING.md](docs/BUILDING.md).
+
+The rest of this README is the upstream documentation.
+
+---
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文（臺灣）](./README.zh-TW.md) | [日本語](./README.ja-JP.md) | [한국어](./README.ko-KR.md) | [Español mexicano](./README.es-MX.md) | [Português (Brasil)](./README.pt-BR.md) | [Türkçe](./README.tr-TR.md)
 
