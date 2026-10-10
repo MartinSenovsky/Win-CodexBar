@@ -1,6 +1,6 @@
 # Win-CodexBar — Claude + Codex floating bar fork
 
-> **Unofficial fork** of [Finesssee/Win-CodexBar](https://github.com/Finesssee/Win-CodexBar). It is not affiliated with or endorsed by the upstream maintainers, Anthropic, or OpenAI. All credit for the app goes to the upstream project; this fork only reworks the floating bar.
+> **Unofficial fork** of [nesszer/Win-CodexBar](https://github.com/nesszer/Win-CodexBar). It is not affiliated with or endorsed by the upstream maintainers, Anthropic, or OpenAI. All credit for the app goes to the upstream project; this fork only reworks the floating bar.
 
 <p align="center">
   <img src="docs/images/floatbar.png" width="244" alt="Floating bar showing a Claude card (99% of the session left, resets in 16h 44m; 85% of the week left, resets in 4d 4h) above a Codex card (88% of the week left, resets in 3d 21h)"/>
