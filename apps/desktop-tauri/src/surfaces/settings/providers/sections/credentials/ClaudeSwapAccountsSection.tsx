@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type {
   ClaudeSwapAccount,
+  ClaudeSwapAccountSource,
   ClaudeSwapAccountsState,
   ClaudeSwapHistoricalUsage,
   ClaudeSwapSpendWindow,
@@ -12,19 +13,54 @@ import {
   claudeSwapAccountsList,
   claudeSwapAccountReauthenticate,
   claudeSwapAccountSwitch,
-  getSettingsSnapshot,
-  updateSettings,
 } from "../../../../../lib/tauri";
 import {
   localClaudeReconciliationOutcome,
   useClaudeReconciliation,
 } from "../../../../../hooks/useClaudeReconciliation";
 import { useCurrency } from "../../../../../hooks/CurrencyProvider";
+import { formatSessionEquivalentEstimate } from "../UsageDetailsSection";
 
 interface Props {
   t: (key: LocaleKey) => string;
   language?: Language;
+  /** Settings `claudeSwapEnabled`; the switch lives in Claude > Options. */
+  enabled: boolean;
+  /** Settings `claudeSwapExecutablePath`; the field sits under that switch. */
+  executablePath: string;
+  /** Settings `claudeSwapSource`; the Source picker sits under that switch. */
+  source?: ClaudeSwapAccountSource;
+  /** Settings `showAsUsed`; quota windows read as used instead of left. */
+  showAsUsed?: boolean;
+  /** Settings `hidePersonalInfo`. The backend masks the labels, so a change reloads the list. */
+  hidePersonalInfo?: boolean;
 }
+
+interface SourceText {
+  title: LocaleKey;
+  noExecutable: LocaleKey;
+  ready: LocaleKey;
+  empty: LocaleKey;
+  disabled: LocaleKey;
+}
+
+/** Copy that names the selected tool. */
+const SOURCE_TEXT: Record<ClaudeSwapAccountSource, SourceText> = {
+  "claude-swap": {
+    title: "ClaudeSwapTitle",
+    noExecutable: "ClaudeSwapStatusNoExecutable",
+    ready: "ClaudeSwapStatusReady",
+    empty: "ClaudeSwapEmpty",
+    disabled: "ClaudeSwapDisabled",
+  },
+  tcr: {
+    title: "ClaudeTcrTitle",
+    noExecutable: "ClaudeTcrStatusNoExecutable",
+    ready: "ClaudeTcrStatusReady",
+    empty: "ClaudeTcrEmpty",
+    disabled: "ClaudeTcrDisabled",
+  },
+};
 
 const EMPTY_STATE: ClaudeSwapAccountsState = {
   enabled: false,
@@ -33,13 +69,33 @@ const EMPTY_STATE: ClaudeSwapAccountsState = {
   error: null,
 };
 
+function quotaPercent(
+  t: (key: LocaleKey) => string,
+  usedPercent: number,
+  showAsUsed: boolean,
+): string {
+  const used = Math.max(0, Math.min(100, Math.round(usedPercent)));
+  return showAsUsed
+    ? `${used}% ${t("PanelUsedSuffix")}`
+    : `${100 - used}% ${t("PanelLeftSuffix")}`;
+}
+
 function usageLabel(
   t: (key: LocaleKey) => string,
   key: LocaleKey,
   window: { usedPercent: number } | null,
+  showAsUsed: boolean,
 ): string | null {
   if (!window) return null;
-  return `${t(key)} ${Math.round(window.usedPercent)}%`;
+  return `${t(key)} ${quotaPercent(t, window.usedPercent, showAsUsed)}`;
+}
+
+function scopedLabel(
+  t: (key: LocaleKey) => string,
+  window: { name: string; usedPercent: number },
+  showAsUsed: boolean,
+): string {
+  return `${window.name} ${quotaPercent(t, window.usedPercent, showAsUsed)}`;
 }
 
 function spendLabel(
@@ -63,12 +119,13 @@ function historicalLabel(
   history: ClaudeSwapHistoricalUsage | null,
   locale: string,
   formatCurrency: (amount: number | null | undefined, sourceCode: string) => string,
+  showAsUsed: boolean,
 ): string | null {
   if (!history) return null;
   const windows = [
-    usageLabel(t, "ProviderSession", history.fiveHour),
-    usageLabel(t, "ProviderWeekly", history.sevenDay),
-    ...history.scoped.map((window) => `${window.name} ${Math.round(window.usedPercent)}%`),
+    usageLabel(t, "ProviderSession", history.fiveHour, showAsUsed),
+    usageLabel(t, "ProviderWeekly", history.sevenDay, showAsUsed),
+    ...history.scoped.map((window) => scopedLabel(t, window, showAsUsed)),
     spendLabel(t, history.spend, locale, formatCurrency),
   ].filter(Boolean);
   const captured = new Intl.DateTimeFormat(locale, {
@@ -99,13 +156,19 @@ function languageLocale(language: Language): string {
  *
  * This list is deliberately separate from the built-in saved Claude Code
  * accounts above: it is display + explicit activation only, is hidden while the
- * integration is disabled or unconfigured, and CodexBar never reads or stores
- * cswap credentials.
+ * integration is disabled, and CodexBar never reads or stores cswap credentials.
+ * The opt-in switch and executable path are settings rows elsewhere in the
+ * pane; this list reloads whenever either changes.
  */
-export function ClaudeSwapAccountsSection({ t, language = "english" }: Props) {
-  const [enabled, setEnabled] = useState(false);
-  const [executablePath, setExecutablePath] = useState("");
-  const [pathDraft, setPathDraft] = useState("");
+export function ClaudeSwapAccountsSection({
+  t,
+  language = "english",
+  enabled,
+  executablePath,
+  source = "claude-swap",
+  showAsUsed = false,
+  hidePersonalInfo = false,
+}: Props) {
   const [state, setState] = useState<ClaudeSwapAccountsState>(EMPTY_STATE);
   const locale = languageLocale(language);
   const { format: formatCurrency } = useCurrency();
@@ -115,31 +178,35 @@ export function ClaudeSwapAccountsSection({ t, language = "english" }: Props) {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(false);
+  // Bumped whenever the enabled flag, path or source changes. A list call
+  // started under an older configuration must not publish its cards: a late
+  // claude-swap reply would otherwise show cswap accounts under tcr.
+  const generation = useRef(0);
+  const shownSource = useRef(source);
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (owner: number) => {
     const next = await claudeSwapAccountsList();
-    if (mounted.current) {
-      setState(next);
-      setEnabled(next.enabled);
-    }
+    if (mounted.current && generation.current === owner) setState(next);
   }, []);
 
   useEffect(() => {
     mounted.current = true;
-    void getSettingsSnapshot()
-      .then((settings) => {
-        if (!mounted.current) return;
-        setEnabled(settings.claudeSwapEnabled ?? false);
-        const path = settings.claudeSwapExecutablePath ?? "";
-        setExecutablePath(path);
-        setPathDraft(path);
-      })
-      .catch((e) => {
-        if (mounted.current) setError(String(e));
-      });
+    const owner = ++generation.current;
+    if (shownSource.current !== source) {
+      shownSource.current = source;
+      setState(EMPTY_STATE);
+      setMessage(null);
+    }
+    if (!enabled) {
+      setState(EMPTY_STATE);
+      return () => {
+        mounted.current = false;
+      };
+    }
     const load = () => {
-      void reload().catch((e) => {
-        if (mounted.current) setError(String(e));
+      setError(null);
+      void reload(owner).catch((e) => {
+        if (mounted.current && generation.current === owner) setError(String(e));
       });
     };
     load();
@@ -148,7 +215,7 @@ export function ClaudeSwapAccountsSection({ t, language = "english" }: Props) {
       mounted.current = false;
       void unlisten.then((fn) => fn()).catch(() => {});
     };
-  }, [reload]);
+  }, [enabled, executablePath, source, hidePersonalInfo, reload]);
 
   useEffect(() => {
     const outcome = localClaudeReconciliationOutcome(snapshot, operation?.generation ?? null);
@@ -161,34 +228,6 @@ export function ClaudeSwapAccountsSection({ t, language = "english" }: Props) {
       setError(null);
     }
   }, [operation, snapshot, t]);
-
-  const runSettings = async (
-    patch: { claudeSwapEnabled?: boolean; claudeSwapExecutablePath?: string },
-  ) => {
-    setBusy(true);
-    setError(null);
-    setMessage(null);
-    try {
-      await updateSettings(patch);
-      // Persist the accepted path in local state so a later blur with the same
-      // value is a no-op, while a failed save leaves the draft untouched and
-      // remains retryable.
-      if (mounted.current && patch.claudeSwapExecutablePath !== undefined) {
-        setExecutablePath(patch.claudeSwapExecutablePath);
-      }
-      await reload();
-    } catch (e) {
-      if (mounted.current) setError(String(e));
-    } finally {
-      if (mounted.current) setBusy(false);
-    }
-  };
-
-  const savePath = async () => {
-    const next = pathDraft.trim();
-    if (next === executablePath.trim()) return;
-    await runSettings({ claudeSwapExecutablePath: next });
-  };
 
   const runAccountAction = async (account: ClaudeSwapAccount) => {
     setBusy(true);
@@ -215,44 +254,15 @@ export function ClaudeSwapAccountsSection({ t, language = "english" }: Props) {
     }
   };
 
-  const status = !enabled
-    ? t("ClaudeSwapStatusDisabled")
-    : !state.executableConfigured
-      ? t("ClaudeSwapStatusNoExecutable")
-      : t("ClaudeSwapStatusReady");
+  if (!enabled) return null;
+
+  const text = SOURCE_TEXT[source] ?? SOURCE_TEXT["claude-swap"];
+  const status = !state.executableConfigured ? t(text.noExecutable) : t(text.ready);
 
   return (
     <section className="provider-detail-section claude-swap-accounts">
-      <h4>{t("ClaudeSwapTitle")}</h4>
-      <p className="settings-section__hint">{t("ClaudeSwapHint")}</p>
-      <label className="provider-detail-toggle">
-        <input
-          type="checkbox"
-          checked={enabled}
-          disabled={busy || reconciling}
-          onChange={(e) => void runSettings({ claudeSwapEnabled: e.target.checked })}
-        />
-        <span>
-          <span className="provider-detail-toggle__label">{t("ClaudeSwapEnable")}</span>
-          <span className="provider-detail-toggle__helper">{t("ClaudeSwapEnableHelp")}</span>
-        </span>
-      </label>
-      <label className="provider-detail-field">
-        <span className="provider-detail-field__label">{t("ClaudeSwapExecutablePath")}</span>
-        <input
-          type="text"
-          className="provider-detail-field__input"
-          value={pathDraft}
-          disabled={busy || reconciling}
-          placeholder={t("ClaudeSwapExecutablePathPlaceholder")}
-          onChange={(e) => setPathDraft(e.target.value)}
-          onBlur={() => void savePath()}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void savePath();
-          }}
-        />
-      </label>
-      {enabled && <p className="provider-detail-helper">{status}</p>}
+      <h4>{t(text.title)}</h4>
+      <p className="provider-detail-helper">{status}</p>
       {reconciling && <p className="provider-detail-helper" role="status">{t("ClaudeSwapReconciling")}</p>}
       {error && (
         <div className="provider-detail-error" role="alert">
@@ -269,18 +279,25 @@ export function ClaudeSwapAccountsSection({ t, language = "english" }: Props) {
           {message}
         </div>
       )}
-      {enabled && state.executableConfigured && state.accounts.length === 0 && !state.error && (
-        <p>{t("ClaudeSwapEmpty")}</p>
+      {state.executableConfigured && state.accounts.length === 0 && !state.error && (
+        <p>{t(text.empty)}</p>
       )}
       <ul className="credential-list">
         {state.accounts.map((account) => {
-          const session = usageLabel(t, "ProviderSession", account.fiveHour);
-          const weekly = usageLabel(t, "ProviderWeekly", account.sevenDay);
+          const session = usageLabel(t, "ProviderSession", account.fiveHour, showAsUsed);
+          const weekly = usageLabel(t, "ProviderWeekly", account.sevenDay, showAsUsed);
           const scoped = account.scoped
-            .map((window) => `${window.name} ${Math.round(window.usedPercent)}%`)
+            .map((window) => scopedLabel(t, window, showAsUsed))
             .join(" \u00b7 ");
           const spend = spendLabel(t, account.spend, locale, formatCurrency);
-          const historical = historicalLabel(t, account.historicalUsage, locale, formatCurrency);
+          const historical = historicalLabel(
+            t,
+            account.historicalUsage,
+            locale,
+            formatCurrency,
+            showAsUsed,
+          );
+          const forecast = formatSessionEquivalentEstimate(account.sessionEquivalentForecast);
           return (
             <li className="credential-card" key={account.id}>
               <div className="credential-card__header">
@@ -290,6 +307,7 @@ export function ClaudeSwapAccountsSection({ t, language = "english" }: Props) {
                     {[session, weekly, scoped || null, spend].filter(Boolean).join(" \u00b7 ") ||
                       (!account.error ? t("ClaudeSwapUsageUnavailable") : "")}
                   </span>
+                  {forecast && <span className="credential-card__meta">{forecast}</span>}
                   {historical && <span className="credential-card__meta">{historical}</span>}
                   {account.isActive && (
                     <span className="credential-card__badge credential-card__badge--set">
@@ -297,7 +315,7 @@ export function ClaudeSwapAccountsSection({ t, language = "english" }: Props) {
                     </span>
                   )}
                   {account.isDisabled && (
-                    <span className="credential-card__meta">{t("ClaudeSwapDisabled")}</span>
+                    <span className="credential-card__meta">{t(text.disabled)}</span>
                   )}
                   {account.error && (
                     <span className="credential-card__meta">{account.error}</span>

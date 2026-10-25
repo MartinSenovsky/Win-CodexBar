@@ -11,7 +11,8 @@ use serde_json::Value;
 
 use crate::core::ProviderError;
 
-use super::{scalar_string, value_f64, value_i64};
+use super::{scalar_string, value_i64};
+use crate::providers::json;
 
 /// Parsed result of a coding-plan fetch (page JSON, remains API, or HTML scrape).
 #[derive(Debug, Clone)]
@@ -64,10 +65,96 @@ pub(super) struct RemainsRow {
 // for non-weekly rows, IANA timezone names, host/env URL overrides
 // (`MiniMaxSettingsReader`).
 
+/// MiniMax console times are China Standard Time.
+const CN_TZ: FixedOffset = FixedOffset::east_opt(8 * 3600).unwrap();
+
 /// Look up a value trying snake_case then camelCase (upstream normalizes the
 /// camelCase aliases onto the snake_case keys).
 fn get_field<'a>(obj: &'a Value, snake: &str, camel: &str) -> Option<&'a Value> {
     obj.get(snake).or_else(|| obj.get(camel))
+}
+
+/// Snake/camel key pairs for one quota lane of a `model_remains[]` entry.
+struct LaneKeys {
+    total: [&'static str; 2],
+    usage: [&'static str; 2],
+    remaining_percent: [&'static str; 2],
+    status: [&'static str; 2],
+    start: [&'static str; 2],
+    end: [&'static str; 2],
+    remains: [&'static str; 2],
+}
+
+const INTERVAL_LANE: LaneKeys = LaneKeys {
+    total: ["current_interval_total_count", "currentIntervalTotalCount"],
+    usage: ["current_interval_usage_count", "currentIntervalUsageCount"],
+    remaining_percent: [
+        "current_interval_remaining_percent",
+        "currentIntervalRemainingPercent",
+    ],
+    status: ["current_interval_status", "currentIntervalStatus"],
+    start: ["start_time", "startTime"],
+    end: ["end_time", "endTime"],
+    remains: ["remains_time", "remainsTime"],
+};
+
+const WEEKLY_LANE: LaneKeys = LaneKeys {
+    total: ["current_weekly_total_count", "currentWeeklyTotalCount"],
+    usage: ["current_weekly_usage_count", "currentWeeklyUsageCount"],
+    remaining_percent: [
+        "current_weekly_remaining_percent",
+        "currentWeeklyRemainingPercent",
+    ],
+    status: ["current_weekly_status", "currentWeeklyStatus"],
+    start: ["weekly_start_time", "weeklyStartTime"],
+    end: ["weekly_end_time", "weeklyEndTime"],
+    remains: ["weekly_remains_time", "weeklyRemainsTime"],
+};
+
+/// Raw lane fields. MiniMax's `usage_count` is the remaining count.
+#[derive(Clone, Copy)]
+struct LaneFields {
+    total: Option<i64>,
+    remaining: Option<i64>,
+    remaining_percent: Option<f64>,
+    status: Option<i64>,
+    start: Option<i64>,
+    end: Option<i64>,
+    remains: Option<i64>,
+}
+
+impl LaneKeys {
+    fn read(&self, entry: &Value) -> LaneFields {
+        let field = |[snake, camel]: [&str; 2]| get_field(entry, snake, camel);
+        LaneFields {
+            total: value_i64(field(self.total)),
+            remaining: value_i64(field(self.usage)),
+            remaining_percent: json::lenient_f64(field(self.remaining_percent)),
+            status: value_i64(field(self.status)),
+            start: value_i64(field(self.start)),
+            end: value_i64(field(self.end)),
+            remains: value_i64(field(self.remains)),
+        }
+    }
+}
+
+/// The next `time` today in `tz`, or a day from now once it has passed.
+pub(super) fn next_time_today(
+    time: chrono::NaiveTime,
+    tz: FixedOffset,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let dt = now
+        .date_naive()
+        .and_time(time)
+        .and_local_timezone(tz)
+        .single()?;
+    let candidate = dt.with_timezone(&Utc);
+    Some(if candidate < now {
+        now + Duration::days(1)
+    } else {
+        candidate
+    })
 }
 
 /// Decode an epoch integer that may be in milliseconds, seconds, or unparseable.
@@ -109,6 +196,27 @@ fn window_minutes(start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>) -> O
     } else {
         None
     }
+}
+
+/// Upstream `MiniMaxUsageSnapshot.windowMinutes(for:)`: the length a service
+/// row's window type names ("Today", "Weekly", "5 hours", "30 minutes",
+/// "2 days"). Other labels ("Custom", "Unknown") have no length.
+pub(super) fn window_minutes_for_window_type(window_type: &str) -> Option<u32> {
+    let window_type = window_type.trim().to_lowercase();
+    match window_type.as_str() {
+        "today" => return Some(24 * 60),
+        "weekly" => return Some(7 * 24 * 60),
+        _ => {}
+    }
+    let mut parts = window_type.split_whitespace();
+    let value = parts.next()?.parse::<u32>().ok()?;
+    let per_unit = match parts.next()? {
+        "hour" | "hours" | "h" | "hr" | "hrs" => 60,
+        "minute" | "minutes" | "min" | "mins" | "m" => 1,
+        "day" | "days" | "d" => 24 * 60,
+        _ => return None,
+    };
+    value.checked_mul(per_unit)
 }
 
 /// `resetsAt(end:remains:now:)`.
@@ -246,7 +354,7 @@ fn time_range_string(start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>) -
     let (Some(start), Some(end)) = (start, end) else {
         return "N/A".to_string();
     };
-    let tz = FixedOffset::east_opt(8 * 3600).unwrap();
+    let tz = CN_TZ;
     format!(
         "{}-{}(UTC+8)",
         start.with_timezone(&tz).format("%H:%M"),
@@ -261,7 +369,7 @@ fn weekly_time_range_string(
 ) -> Option<String> {
     let start = start?;
     let end = end?;
-    let tz = FixedOffset::east_opt(8 * 3600).unwrap();
+    let tz = CN_TZ;
     Some(format!(
         "{} - {}(UTC+8)",
         start.with_timezone(&tz).format("%m/%d %H:%M"),
@@ -281,25 +389,15 @@ fn reset_description(
     {
         let interval = (resets - now).num_seconds();
         if interval < 60 {
-            return format!("Resets in {} seconds", interval);
-        } else if interval < 3600 {
-            let minutes = interval / 60;
-            return format!(
-                "Resets in {} minute{}",
-                minutes,
-                if minutes == 1 { "" } else { "s" }
-            );
-        } else if interval < 86400 {
-            let hours = interval / 3600;
-            return format!(
-                "Resets in {} hour{}",
-                hours,
-                if hours == 1 { "" } else { "s" }
-            );
-        } else {
-            let days = interval / 86400;
-            return format!("Resets in {} day{}", days, if days == 1 { "" } else { "s" });
+            return format!("Resets in {interval} seconds");
         }
+        let (unit_seconds, unit) = [(86_400, "day"), (3_600, "hour")]
+            .into_iter()
+            .find(|(unit_seconds, _)| interval >= *unit_seconds)
+            .unwrap_or((60, "minute"));
+        let count = interval / unit_seconds;
+        let plural = if count == 1 { "" } else { "s" };
+        return format!("Resets in {count} {unit}{plural}");
     }
     format!("{window_type}: {time_range}")
 }
@@ -307,23 +405,22 @@ fn reset_description(
 /// Build a `RemainsRow` from the raw interval/weekly fields (upstream
 /// `makeServiceUsage`). Returns `None` when the row is a placeholder that
 /// should be skipped.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "signature mirrors the flat upstream makeServiceUsage payload fields one-to-one"
-)]
 fn make_remains_row(
     service_type: &str,
     window_type_override: Option<&str>,
-    total: Option<i64>,
-    remaining: Option<i64>,
-    remaining_percent: Option<f64>,
-    status: Option<i64>,
-    start: Option<i64>,
-    end: Option<i64>,
-    remains_time: Option<i64>,
+    lane: &LaneFields,
     now: DateTime<Utc>,
     is_weekly: bool,
 ) -> Option<RemainsRow> {
+    let LaneFields {
+        total,
+        remaining,
+        remaining_percent,
+        status,
+        start,
+        end,
+        remains: remains_time,
+    } = *lane;
     if is_unavailable_quota_placeholder(
         service_type,
         window_type_override,
@@ -362,7 +459,14 @@ fn make_remains_row(
         reset_description(&window_type, &time_range, now, resets)
     };
 
-    let win_minutes = window_minutes(start_dt, end_dt);
+    // Upstream `MiniMaxUsageSnapshot.windowMinutes(for:)` gives every weekly
+    // row 7 days from its window type, even when the payload has no weekly
+    // start and end. Other rows keep their payload span.
+    let win_minutes = if window_type.eq_ignore_ascii_case("weekly") {
+        window_minutes_for_window_type(&window_type)
+    } else {
+        window_minutes(start_dt, end_dt)
+    };
 
     let percent = if is_unlimited {
         0.0
@@ -407,7 +511,7 @@ fn parse_multi_service(json: &Value) -> Option<Vec<ServiceRow>> {
         if limit <= 0 {
             continue;
         }
-        let percent = match value_f64(item.get("percent")) {
+        let percent = match json::lenient_f64(item.get("percent")) {
             Some(p) => p,
             None => (usage as f64 / limit as f64) * 100.0,
         };
@@ -433,7 +537,7 @@ fn parse_resets_at_from_time_range(
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
     let lower = window_type.trim().to_lowercase();
-    let tz = FixedOffset::east_opt(8 * 3600).unwrap();
+    let tz = CN_TZ;
 
     if lower == "today" {
         let parts: Vec<&str> = time_range.splitn(2, '-').collect();
@@ -458,13 +562,7 @@ fn parse_resets_at_from_time_range(
             re.replace_all(end_part, "").trim().to_string()
         };
         let time = chrono::NaiveTime::parse_from_str(&end_clean, "%H:%M").ok()?;
-        let today = now.date_naive();
-        let dt = today.and_time(time).and_local_timezone(tz).single()?;
-        let mut candidate = dt.with_timezone(&Utc);
-        if candidate < now {
-            candidate = now + Duration::days(1);
-        }
-        return Some(candidate);
+        return next_time_today(time, tz, now);
     }
 
     None
@@ -505,30 +603,15 @@ fn parse_plan_name_from_data(data: &Value) -> Option<String> {
             let name = scalar_string(get_field(e, "model_name", "modelName"))
                 .map(|n| n.trim().to_lowercase())
                 .unwrap_or_default();
+            let lane = INTERVAL_LANE.read(e);
             name == "video"
                 && is_unavailable_quota_placeholder(
                     "Text to Video",
                     None,
-                    value_i64(get_field(
-                        e,
-                        "current_interval_status",
-                        "currentIntervalStatus",
-                    )),
-                    value_i64(get_field(
-                        e,
-                        "current_interval_total_count",
-                        "currentIntervalTotalCount",
-                    )),
-                    value_i64(get_field(
-                        e,
-                        "current_interval_usage_count",
-                        "currentIntervalUsageCount",
-                    )),
-                    value_f64(get_field(
-                        e,
-                        "current_interval_remaining_percent",
-                        "currentIntervalRemainingPercent",
-                    )),
+                    lane.status,
+                    lane.total,
+                    lane.remaining,
+                    lane.remaining_percent,
                 )
         });
         if has_text_generation && has_unavailable_video {
@@ -598,35 +681,9 @@ fn parse_remains(
         let service_type = map_model_name_to_service_type(&model_name);
 
         // Interval row
-        if let Some(mut row) = make_remains_row(
-            &service_type,
-            None,
-            value_i64(get_field(
-                entry,
-                "current_interval_total_count",
-                "currentIntervalTotalCount",
-            )),
-            value_i64(get_field(
-                entry,
-                "current_interval_usage_count",
-                "currentIntervalUsageCount",
-            )),
-            value_f64(get_field(
-                entry,
-                "current_interval_remaining_percent",
-                "currentIntervalRemainingPercent",
-            )),
-            value_i64(get_field(
-                entry,
-                "current_interval_status",
-                "currentIntervalStatus",
-            )),
-            value_i64(get_field(entry, "start_time", "startTime")),
-            value_i64(get_field(entry, "end_time", "endTime")),
-            value_i64(get_field(entry, "remains_time", "remainsTime")),
-            now,
-            false,
-        ) {
+        if let Some(mut row) =
+            make_remains_row(&service_type, None, &INTERVAL_LANE.read(entry), now, false)
+        {
             row.model_name = model_name.clone();
             rows.push(row);
         }
@@ -636,29 +693,7 @@ fn parse_remains(
             && let Some(mut row) = make_remains_row(
                 &service_type,
                 Some("Weekly"),
-                value_i64(get_field(
-                    entry,
-                    "current_weekly_total_count",
-                    "currentWeeklyTotalCount",
-                )),
-                value_i64(get_field(
-                    entry,
-                    "current_weekly_usage_count",
-                    "currentWeeklyUsageCount",
-                )),
-                value_f64(get_field(
-                    entry,
-                    "current_weekly_remaining_percent",
-                    "currentWeeklyRemainingPercent",
-                )),
-                value_i64(get_field(
-                    entry,
-                    "current_weekly_status",
-                    "currentWeeklyStatus",
-                )),
-                value_i64(get_field(entry, "weekly_start_time", "weeklyStartTime")),
-                value_i64(get_field(entry, "weekly_end_time", "weeklyEndTime")),
-                value_i64(get_field(entry, "weekly_remains_time", "weeklyRemainsTime")),
+                &WEEKLY_LANE.read(entry),
                 now,
                 true,
             )
@@ -694,299 +729,5 @@ pub(crate) fn is_token_plan_without_coding_plan(err: &ProviderError) -> bool {
 }
 
 #[cfg(test)]
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn oversized_remains_yields_no_reset_line_and_keeps_usage() {
-        // `remains` above ~8.3e15 ms cannot be represented as a timestamp:
-        // `Duration::try_seconds` must return None, so `resets_at` is None and
-        // the usage percentage survives (upstream #3758/#3764).
-        assert_eq!(resets_at(None, Some(i64::MAX), now()), None);
-    }
-
-    #[test]
-    fn negative_remains_yields_no_reset_line() {
-        assert_eq!(resets_at(None, Some(-5), now()), None);
-        assert_eq!(resets_at(None, Some(0), now()), None);
-    }
-
-    #[test]
-    fn positive_remains_keeps_the_reset_line() {
-        // 90_000 > 1_000_000? No: below the heuristic, treated as seconds.
-        let reset = resets_at(None, Some(60), now()).expect("small remains");
-        assert_eq!(reset, now() + Duration::seconds(60));
-        // Above the heuristic: treated as milliseconds.
-        let reset_ms = resets_at(None, Some(2_000_000), now()).expect("ms remains");
-        assert_eq!(reset_ms, now() + Duration::seconds(2_000));
-    }
-
-    #[test]
-    fn end_time_in_the_future_wins_over_remains() {
-        let end = now() + Duration::seconds(120);
-        assert_eq!(resets_at(Some(end), Some(60), now()), Some(end));
-    }
-
-    fn now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 8, 3, 12, 0, 0).unwrap()
-    }
-
-    #[test]
-    fn parses_remains_json_snake_case() {
-        let json = serde_json::json!({
-            "data": {
-                "current_subscribe_title": "MiniMax Pro",
-                "model_remains": [{
-                    "model_name": "General",
-                    "current_interval_total_count": 100,
-                    "current_interval_usage_count": 73,
-                    "start_time": 1785792000,
-                    "end_time": 1785878400,
-                    "current_interval_status": 0,
-                    "current_weekly_total_count": 1000,
-                    "current_weekly_usage_count": 850,
-                    "current_weekly_remaining_percent": 85,
-                    "weekly_start_time": 1785792000,
-                    "weekly_end_time": 1786396800,
-                    "current_weekly_status": 0
-                }]
-            }
-        });
-        let snapshot = parse_coding_plan_value(&json, now()).unwrap();
-        let MiniMaxCodingPlanSnapshot::Remains { plan_name, rows } = snapshot else {
-            panic!("expected Remains");
-        };
-        assert_eq!(plan_name.as_deref(), Some("MiniMax Pro"));
-        // remaining percent 73 → used 27
-        assert!((rows[0].percent - 27.0).abs() < 0.01);
-        // window_minutes = (end-start)/60 = 86400/60 = 1440
-        assert_eq!(rows[0].window_minutes, Some(1440));
-        assert!(rows[0].resets_at.is_some());
-        // General is text-gen → weekly row generated
-        assert_eq!(rows.len(), 2);
-        assert!(rows[1].is_weekly);
-    }
-
-    #[test]
-    fn parses_counts_only_entry() {
-        let json = serde_json::json!({
-            "data": {
-                "model_remains": [{
-                    "model_name": "General",
-                    "current_interval_total_count": 100,
-                    "current_interval_usage_count": 40,
-                    "start_time": 1722691200,
-                    "end_time": 1722777600,
-                    "current_interval_status": 0
-                }]
-            }
-        });
-        let snapshot = parse_coding_plan_value(&json, now()).unwrap();
-        let MiniMaxCodingPlanSnapshot::Remains { rows, .. } = snapshot else {
-            panic!("expected Remains");
-        };
-        // total=100, remaining=40 → used 60/100 = 60%
-        assert!((rows[0].percent - 60.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn parses_remaining_percent_with_boost_field_ignored() {
-        let json = serde_json::json!({
-            "data": {
-                "model_remains": [{
-                    "model_name": "General",
-                    "current_interval_total_count": 0,
-                    "current_interval_usage_count": 0,
-                    "current_interval_remaining_percent": 50,
-                    "interval_boost_permill": 1500,
-                    "start_time": 1722691200,
-                    "end_time": 1722777600,
-                    "current_interval_status": 0
-                }]
-            }
-        });
-        let snapshot = parse_coding_plan_value(&json, now()).unwrap();
-        let MiniMaxCodingPlanSnapshot::Remains { rows, .. } = snapshot else {
-            panic!("expected Remains");
-        };
-        // remainingPercent 50 → used 50%; boost field is ignored dead plumbing
-        assert!((rows[0].percent - 50.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn placeholder_lane_skipped_for_video() {
-        let json = serde_json::json!({
-            "data": {
-                "model_remains": [{
-                    "model_name": "video",
-                    "current_interval_total_count": 0,
-                    "current_interval_usage_count": 0,
-                    "current_interval_remaining_percent": 100,
-                    "current_interval_status": 3
-                }]
-            }
-        });
-        let snapshot = parse_coding_plan_value(&json, now()).unwrap();
-        let MiniMaxCodingPlanSnapshot::Remains { rows, .. } = snapshot else {
-            panic!("expected Remains");
-        };
-        // video is not text-gen → no weekly; interval is placeholder → skipped
-        assert!(rows.is_empty());
-    }
-
-    #[test]
-    fn placeholder_general_weekly_kept_as_unlimited() {
-        let json = serde_json::json!({
-            "data": {
-                "model_remains": [{
-                    "model_name": "General",
-                    "current_interval_total_count": 0,
-                    "current_interval_usage_count": 0,
-                    "current_interval_remaining_percent": 100,
-                    "current_interval_status": 3,
-                    "current_weekly_total_count": 0,
-                    "current_weekly_usage_count": 0,
-                    "current_weekly_remaining_percent": 100,
-                    "current_weekly_status": 3
-                }]
-            }
-        });
-        let snapshot = parse_coding_plan_value(&json, now()).unwrap();
-        let MiniMaxCodingPlanSnapshot::Remains { rows, .. } = snapshot else {
-            panic!("expected Remains");
-        };
-        // interval is placeholder → skipped, but weekly is unlimited → kept
-        let weekly = rows.iter().find(|r| r.is_weekly).unwrap();
-        assert!(weekly.is_unlimited);
-        assert_eq!(weekly.reset_description.as_deref(), Some("Unlimited"));
-        assert!((weekly.percent - 0.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn base_resp_1004_is_auth_required() {
-        let json = serde_json::json!({
-            "data": {
-                "base_resp": { "status_code": 1004 },
-                "model_remains": []
-            }
-        });
-        let err = parse_coding_plan_value(&json, now()).unwrap_err();
-        assert!(matches!(err, ProviderError::AuthRequired));
-    }
-
-    #[test]
-    fn base_resp_status_msg_login_is_auth_required() {
-        let json = serde_json::json!({
-            "data": {
-                "base_resp": { "status_code": 2000, "status_msg": "please log in" },
-                "model_remains": []
-            }
-        });
-        let err = parse_coding_plan_value(&json, now()).unwrap_err();
-        assert!(matches!(err, ProviderError::AuthRequired));
-    }
-
-    #[test]
-    fn base_resp_other_status_is_other_error() {
-        let json = serde_json::json!({
-            "data": {
-                "base_resp": { "status_code": 2000, "status_msg": "quota sync failed" },
-                "model_remains": []
-            }
-        });
-        let err = parse_coding_plan_value(&json, now()).unwrap_err();
-        assert!(matches!(err, ProviderError::Other(_)));
-    }
-
-    #[test]
-    fn base_resp_without_status_code_parses_fine() {
-        let json = serde_json::json!({
-            "data": {
-                "base_resp": {},
-                "model_remains": [{
-                    "model_name": "General",
-                    "current_interval_total_count": 100,
-                    "current_interval_usage_count": 30,
-                    "current_interval_remaining_percent": 70,
-                    "start_time": 1785792000,
-                    "end_time": 1785878400,
-                    "current_interval_status": 0
-                }]
-            }
-        });
-        let snapshot = parse_coding_plan_value(&json, now()).unwrap();
-        let MiniMaxCodingPlanSnapshot::Remains { rows, .. } = snapshot else {
-            panic!("expected Remains");
-        };
-        // remainingPercent 70 → used 30%; no error from absent status_code
-        assert!((rows[0].percent - 30.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn empty_model_remains_is_parse_error() {
-        let json = serde_json::json!({
-            "data": {
-                "model_remains": []
-            }
-        });
-        let err = parse_coding_plan_value(&json, now()).unwrap_err();
-        assert!(matches!(err, ProviderError::Parse(_)));
-    }
-
-    #[test]
-    fn parses_multi_service_json() {
-        let json = serde_json::json!({
-            "data": {
-                "services": [{
-                    "service_type": "Text Generation Pro",
-                    "window_type": "Today",
-                    "time_range": "2026/08/03 00:00 - 2026/08/04 00:00",
-                    "usage": 250,
-                    "limit": 1000
-                }]
-            }
-        });
-        let snapshot = parse_coding_plan_value(&json, now()).unwrap();
-        match snapshot {
-            MiniMaxCodingPlanSnapshot::Services(rows) => {
-                assert_eq!(rows.len(), 1);
-                assert!((rows[0].percent - 25.0).abs() < 0.01);
-                assert!(rows[0].service_type.contains("Pro"));
-            }
-            _ => panic!("expected Services"),
-        }
-    }
-
-    #[test]
-    fn token_plan_predicate_matches_reporter_2062_message() {
-        // Live reporter evidence (issue #254): the legacy remains endpoint 200s
-        // with base_resp 2062 for Token Plan accounts.
-        let json = serde_json::json!({
-            "base_resp": {
-                "status_code": 2062,
-                "status_msg": "no active token plan subscription"
-            }
-        });
-        let err = parse_coding_plan_value(&json, now()).unwrap_err();
-        assert!(matches!(err, ProviderError::Other(_)));
-        assert!(is_token_plan_without_coding_plan(&err));
-    }
-
-    #[test]
-    fn token_plan_predicate_rejects_unrelated_errors() {
-        assert!(!is_token_plan_without_coding_plan(
-            &ProviderError::AuthRequired
-        ));
-        assert!(!is_token_plan_without_coding_plan(&ProviderError::Other(
-            "MiniMax coding plan status 2000".to_string()
-        )));
-        assert!(!is_token_plan_without_coding_plan(&ProviderError::Parse(
-            "Missing coding plan data.".to_string()
-        )));
-        // Case-insensitive match on the message itself.
-        assert!(is_token_plan_without_coding_plan(&ProviderError::Other(
-            "No Active Token Plan Subscription".to_string()
-        )));
-    }
-}
+#[path = "coding_plan_tests.rs"]
+mod tests;

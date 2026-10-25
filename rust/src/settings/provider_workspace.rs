@@ -71,6 +71,24 @@ pub fn validate_provider_workspace_value(
         ProviderId::LLMProxy => validate_llmproxy_base_url(trimmed),
         ProviderId::LLMMan => crate::providers::llmman::validated_llmman_base_url(trimmed)
             .map_err(|err| err.to_string()),
+        ProviderId::Flora => validate_id(
+            trimmed,
+            "FLORA workspace ID",
+            crate::providers::flora::is_workspace_id,
+        ),
+        ProviderId::Vercel => validate_id(
+            trimmed,
+            "Vercel Team ID",
+            crate::providers::vercel::is_team_id,
+        ),
+        ProviderId::Exa => {
+            if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+                return Err(
+                    "Exa API key ID cannot be empty or a path normalization value".to_string(),
+                );
+            }
+            Ok(trimmed.to_string())
+        }
         _ => Ok(trimmed.to_string()),
     }
 }
@@ -244,6 +262,53 @@ mod tests {
         );
         assert!(validate_provider_workspace_value(ProviderId::GitKraken, "org id").is_err());
         assert!(validate_provider_workspace_value(ProviderId::GitKraken, "org\n123").is_err());
+    }
+
+    #[test]
+    fn validates_vercel_team_ids() {
+        assert_eq!(
+            validate_provider_workspace_value(ProviderId::Vercel, " team_abc123 ").unwrap(),
+            "team_abc123"
+        );
+        assert_eq!(
+            validate_provider_workspace_value(ProviderId::Vercel, "my-team").unwrap(),
+            "my-team"
+        );
+        assert_eq!(
+            validate_provider_workspace_value(ProviderId::Vercel, "  ").unwrap(),
+            ""
+        );
+        for invalid in ["team id", "team/../x", "team?x=1", "team\n1"] {
+            assert!(
+                validate_provider_workspace_value(ProviderId::Vercel, invalid).is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validates_flora_workspace_ids() {
+        assert_eq!(
+            validate_provider_workspace_value(ProviderId::Flora, " ws_abc123 ").unwrap(),
+            "ws_abc123"
+        );
+        assert_eq!(
+            validate_provider_workspace_value(ProviderId::Flora, "  ").unwrap(),
+            ""
+        );
+        for invalid in [
+            "abc123",
+            "ws_",
+            "ws_abc-123",
+            "ws_abc/123",
+            "https://app.flora.ai/ws_abc123",
+            "wrk_abc123",
+        ] {
+            assert!(
+                validate_provider_workspace_value(ProviderId::Flora, invalid).is_err(),
+                "{invalid} must be rejected"
+            );
+        }
     }
 
     #[test]

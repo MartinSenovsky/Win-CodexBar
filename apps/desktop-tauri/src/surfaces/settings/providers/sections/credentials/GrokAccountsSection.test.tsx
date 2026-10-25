@@ -17,7 +17,7 @@ const events = vi.hoisted(() => ({
 }));
 vi.mock("../../../../../lib/tauri", () => mocks);
 vi.mock("@tauri-apps/api/event", () => events);
-vi.mock("../../../../../hooks/useLocale", () => ({ useLocale: () => ({ t: (key: string) => key }) }));
+vi.mock("../../../../../hooks/useLocale", () => import("../../../../../test/mocks/locale"));
 import { GrokAccountsSection } from "./GrokAccountsSection";
 
 const t = (key: string) => key;
@@ -94,5 +94,26 @@ describe("GrokAccountsSection", () => {
     render(<GrokAccountsSection t={t} />);
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Could not read"));
     expect((screen.getByText("CodexAccountsAddButton") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("labels accounts Account N under Hide Personal Info, with no email", async () => {
+    const { container } = render(<GrokAccountsSection t={t} hidePersonalInfo />);
+    await screen.findByText("Account 1");
+    expect(screen.getByText("Account 2")).toBeInTheDocument();
+    expect(container.innerHTML).not.toContain("@");
+    expect(container.innerHTML).not.toContain("example.com");
+  });
+
+  it("numbers hidden accounts in list order, not by sorted id", async () => {
+    // The unsaved live login is listed first, though "user-a" sorts first.
+    const live: GrokAccount = { ...current, id: "user-z", email: "z@example.com" };
+    const saved: GrokAccount = { ...other, id: "user-a", email: "a@example.com" };
+    mocks.grokAccountsList.mockResolvedValue([live, saved]);
+    const { container } = render(<GrokAccountsSection t={t} hidePersonalInfo />);
+    await screen.findByText("Account 2");
+    const labels = [...container.querySelectorAll(".credential-card__info strong")].map(
+      (label) => label.textContent,
+    );
+    expect(labels).toEqual(["Account 1", "Account 2"]);
   });
 });

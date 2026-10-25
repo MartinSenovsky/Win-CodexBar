@@ -36,12 +36,14 @@ use crate::core::ProviderFetchResult;
 use crate::core::{CostSnapshot, RateWindow, UsagePace, UsageSnapshot};
 
 /// How much account identity a snapshot exposes. Upstream 0.48.0 exposes two
-/// CLI modes (`redacted` default, `full` opt-in); upstream's internal `none`
-/// case is intentionally not a user-facing knob here.
+/// CLI modes (`redacted` default, `full` opt-in). `None` is not a CLI value:
+/// it is the default for `serve --all-accounts` without `--identity`
+/// (upstream merge a379b25de, private account expansion).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DashboardIdentity {
     Redacted,
     Full,
+    None,
 }
 
 impl DashboardIdentity {
@@ -207,6 +209,19 @@ pub struct SnapshotInput {
     /// None represents a caller with no fill preference. Dashboard output
     /// defaults that case to remaining quota.
     pub usage_bars_show_used: Option<bool>,
+    /// `Settings::weekly_progress_work_days` for weekly pace (None = linear).
+    pub weekly_work_days: Option<u8>,
+    /// `serve --all-accounts`: unless identity is `Full`, account labels
+    /// become `Account N` and error details are replaced by neutral text.
+    pub all_accounts: bool,
+}
+
+impl SnapshotInput {
+    /// Expanded snapshots hide labels and error details unless the caller
+    /// asked for full identity (upstream `privateLabel`).
+    fn private_accounts(&self) -> bool {
+        self.all_accounts && self.identity != DashboardIdentity::Full
+    }
 }
 
 /// Build the stable display-oriented snapshot (pure; no I/O).
@@ -223,18 +238,21 @@ pub fn build_snapshot(input: &SnapshotInput) -> SnapshotPayload {
     }
 
     let known_ids: BTreeSet<&str> = crate::core::cli_name_map().keys().copied().collect();
-    let mut claude_attached = false;
+    let mut attached: BTreeSet<&str> = BTreeSet::new();
     let providers = input
         .collection
         .providers
         .iter()
         .enumerate()
         .map(|(index, envelope)| {
-            // Provider-specific by design (upstream parity): account data
-            // belongs only on the FIRST claude row.
-            let claude = if !claude_attached && envelope.id == "claude" {
-                claude_attached = true;
-                input.collection.claude_accounts.as_ref()
+            // Account data belongs only on the FIRST row of its provider
+            // (upstream parity).
+            let accounts = if attached.insert(envelope.id.as_str()) {
+                if envelope.id == "claude" {
+                    input.collection.claude_accounts.as_ref()
+                } else {
+                    input.collection.provider_accounts.get(&envelope.id)
+                }
             } else {
                 None
             };
@@ -248,7 +266,7 @@ pub fn build_snapshot(input: &SnapshotInput) -> SnapshotPayload {
                 input,
                 &known_ids,
                 sort_key,
-                claude,
+                accounts,
             )
         })
         .collect();
@@ -273,8 +291,9 @@ fn build_provider(
     input: &SnapshotInput,
     known_ids: &BTreeSet<&str>,
     sort_key: u32,
-    claude: Option<&ClaudeAccountsInput>,
+    accounts_input: Option<&ClaudeAccountsInput>,
 ) -> SnapshotProvider {
+    let private = input.private_accounts();
     let local_cost = costs.get(&envelope.id).map(|raw| CostPayload {
         today_usd: raw.today_usd,
         last_30_days_usd: raw.last_30_days_usd,
@@ -312,32 +331,54 @@ fn build_provider(
             Some(input.collection.generated_at),
             Some(ProviderErrorPayload {
                 code: 1,
-                message: message.clone(),
+                message: if private {
+                    PRIVATE_ACCOUNT_ERROR.to_string()
+                } else {
+                    message.clone()
+                },
                 kind: Some("provider".to_string()),
             }),
         ),
     };
 
-    let (accounts, accounts_error) = match claude {
-        Some(claude) => match &claude.accounts {
+    let (accounts, accounts_error) = match accounts_input {
+        Some(section) => match &section.accounts {
             Ok(accounts) => (
                 Some(
                     accounts
                         .iter()
-                        .map(|account| {
-                            build_account(
+                        .enumerate()
+                        .map(|(index, account)| {
+                            let mut row = build_account(
                                 account,
                                 input.identity,
                                 &envelope.session_label,
                                 &envelope.weekly_label,
                                 input.collection.generated_at,
-                            )
+                                input.weekly_work_days,
+                            );
+                            if private {
+                                row.label = format!("Account {}", index + 1);
+                                if row.error.is_some() {
+                                    row.error = Some(PRIVATE_ACCOUNT_ERROR.to_string());
+                                }
+                            }
+                            row
                         })
                         .collect(),
                 ),
-                None,
+                section
+                    .incomplete
+                    .then(|| "Account list incomplete".to_string()),
             ),
-            Err(adapter_error) => (None, Some(adapter_error.clone())),
+            Err(adapter_error) => (
+                None,
+                Some(if private {
+                    "Account list unavailable".to_string()
+                } else {
+                    adapter_error.clone()
+                }),
+            ),
         },
         None => (None, None),
     };
@@ -367,18 +408,22 @@ fn build_provider(
     }
 }
 
+/// Neutral error text for expanded (`--all-accounts`) snapshots without full identity.
+const PRIVATE_ACCOUNT_ERROR: &str = "Account usage unavailable";
+
 fn build_account(
     account: &AccountFetchEnvelope,
     identity_mode: DashboardIdentity,
     session_label: &str,
     weekly_label: &str,
     generated_at: DateTime<Utc>,
+    weekly_work_days: Option<u8>,
 ) -> AccountPayload {
     let (identity, windows, pace, error, updated_at) = match &account.fetch {
         Ok(result) => (
             make_identity(&result.usage, identity_mode),
             make_windows(None, session_label, weekly_label, &result.usage),
-            make_pace(&result.usage),
+            make_pace(&result.usage, weekly_work_days),
             None,
             Some(result.usage.updated_at),
         ),
@@ -412,6 +457,9 @@ fn dashboard_source(source: &str) -> String {
 }
 
 fn make_identity(usage: &UsageSnapshot, mode: DashboardIdentity) -> Option<IdentityPayload> {
+    if mode == DashboardIdentity::None {
+        return None;
+    }
     let account_email = dashboard_email(usage.account_email.as_deref(), mode);
     let plan = usage
         .login_method
@@ -437,6 +485,7 @@ fn dashboard_email(email: Option<&str>, mode: DashboardIdentity) -> Option<Strin
         return None;
     }
     match mode {
+        DashboardIdentity::None => None,
         DashboardIdentity::Full => Some(email.to_string()),
         DashboardIdentity::Redacted => match email.rfind('@') {
             Some(at) => Some(format!("redacted{}", &email[at..])),
@@ -497,13 +546,13 @@ fn make_window(kind: &str, label: &str, window: &RateWindow) -> WindowPayload {
     make_window_with_idle(kind, label, window, false)
 }
 
-fn make_pace(usage: &UsageSnapshot) -> Option<ProviderPacePayload> {
+fn make_pace(usage: &UsageSnapshot, weekly_work_days: Option<u8>) -> Option<ProviderPacePayload> {
     let payload = ProviderPacePayload {
         primary: None,
         secondary: usage
             .secondary
             .as_ref()
-            .and_then(|window| UsagePace::weekly(window, None, 10080))
+            .and_then(|window| UsagePace::weekly(window, None, 10080, weekly_work_days))
             .map(|pace| pace_payload(&pace)),
         tertiary: None,
     };

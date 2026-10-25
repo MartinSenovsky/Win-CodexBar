@@ -6,9 +6,7 @@ import FloatBarSettingsSection from "./SettingsSection";
 const { centerFloatBar } = vi.hoisted(() => ({ centerFloatBar: vi.fn() }));
 vi.mock("./api", () => ({ centerFloatBar }));
 
-vi.mock("../hooks/useLocale", () => ({
-  useLocale: () => ({ t: (key: string) => key }),
-}));
+vi.mock("../hooks/useLocale", () => import("../test/mocks/locale"));
 
 const settings = {
   floatBarEnabled: true,

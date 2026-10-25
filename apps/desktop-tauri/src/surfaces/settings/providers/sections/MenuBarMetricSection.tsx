@@ -7,6 +7,7 @@ import type {
 } from "../../../../types/bridge";
 import type { LocaleKey } from "../../../../i18n/keys";
 import { localizeWindowLabel } from "../../../../lib/windowLabels";
+import { Field, Select, SettingsGroup } from "../../../../components/FormControls";
 
 interface Props {
   provider: ProviderDetail;
@@ -50,29 +51,26 @@ export function MenuBarMetricSection({
     }
   };
 
+  // Mac shows the picker only when there is a choice to make; a saved choice
+  // the provider no longer offers adds an option, so it stays visible then.
+  if (options.length <= 1) return null;
+
   return (
-    <section className="provider-detail-section provider-detail-menu-metric">
-      <h4>{t("TrayDisplayTitle")}</h4>
-      <label className="provider-detail-field">
-        <span className="provider-detail-field__label">
-          {t("MenuBarMetric")}
-        </span>
-        <select
-          className="provider-detail-select"
+    <SettingsGroup
+      className="provider-detail-group provider-metric-group"
+      footer={t("MenuBarMetricHelper")}
+    >
+      <Field label={t("MenuBarMetric")}>
+        <Select
+          variant="menu"
           value={selected}
+          options={options}
           disabled={disabled}
-          onChange={(e) => handleChange(e.target.value as MetricPreference)}
-        >
-          {options.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <p className="provider-detail-helper">{t("MenuBarMetricHelper")}</p>
-      {error && <p className="provider-detail-error">{error}</p>}
-    </section>
+          onChange={(value) => handleChange(value as MetricPreference)}
+        />
+      </Field>
+      {error && <p className="provider-option-error">{error}</p>}
+    </SettingsGroup>
   );
 }
 
@@ -127,15 +125,34 @@ function metricOptions(
   if (provider.id === "gemini" && provider.weekly) {
     options.push({ value: "average", label: t("Average") });
   }
+  // Upstream 0.75.0 (#4495): the latest Tokens/min from Live usage. The tray
+  // meter keeps the Automatic lane; the tray status text shows the rate.
+  if (provider.tokensPerMinuteMetric) {
+    options.push({ value: "tokensPerMinute", label: t("MetricTokensPerMinute") });
+  }
+  // Upstream 0.73.0 (#4269): provider-declared named allowances, offered
+  // before the first refresh. The live window title wins over the declared one.
+  for (const named of provider.namedExtraMetrics ?? []) {
+    const live = provider.extraRateWindows.find((extra) => extra.id === named.id);
+    options.push({
+      value: `extra:${named.id}`,
+      label: live?.title.trim() || named.label,
+    });
+  }
   if (!options.some((option) => option.value === selected)) {
     const labelKey = SAVED_ONLY_LABEL_KEYS[selected];
     options.push({
       value: selected,
-      label: labelKey ? t(labelKey) : selected,
+      label: labelKey ? t(labelKey) : savedOnlyLabel(selected),
     });
   }
 
   return options;
+}
+
+/** A retired named allowance keeps its window id visible, not the storage prefix. */
+function savedOnlyLabel(selected: MetricPreference): string {
+  return selected.startsWith("extra:") ? selected.slice("extra:".length) : selected;
 }
 
 /** Labels for saved choices the provider no longer offers. */
@@ -143,4 +160,5 @@ const SAVED_ONLY_LABEL_KEYS: Partial<Record<MetricPreference, LocaleKey>> = {
   credits: "CreditsLabel",
   extraUsage: "ExtraUsage",
   monthlyPlan: "MetricMonthlyPlan",
+  tokensPerMinute: "MetricTokensPerMinute",
 };

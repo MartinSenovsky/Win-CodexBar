@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { LocaleKey } from "../../../../../i18n/keys";
 import {
   getProviderWorkspaceId,
   setProviderWorkspaceId,
 } from "../../../../../lib/tauri";
+
+/** Fired on `window` after a workspace ID is saved; `detail` is the provider id. */
+export const PROVIDER_WORKSPACE_ID_SAVED_EVENT = "codexbar:provider-workspace-id-saved";
 
 interface Props {
   providerId?: string;
@@ -11,21 +14,17 @@ interface Props {
 }
 
 /**
- * OpenAI/Codex-specific detail help.
- *
- * Port of the help strings below the `ProviderId::Codex` toggles in
- * `rust/src/native_ui/preferences.rs::render_provider_detail_panel` (~6625).
- * The toggles themselves (`codex_historical_tracking`,
- * `codex_openai_web_extras`) are not yet persisted through
- * `update_settings` in the Tauri bridge, so this component shows the
- * upstream hint copy only. The toggles will be surfaced once they join
- * the SettingsUpdate bridge (tracked alongside Phase 6e token-accounts).
+ * Workspace, organization or base-URL field for API providers that need one
+ * next to their key (OpenAI API project ID, LiteLLM base URL, and so on).
+ * Renders nothing for other providers.
  */
-export function OpenAiExtras({ providerId = "codex", t }: Props) {
+export function OpenAiExtras({ providerId = "openaiapi", t }: Props) {
   const [projectId, setProjectId] = useState("");
   const [savedProjectId, setSavedProjectId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const errorId = useId();
+  const editGeneration = useRef(0);
   const config = extraConfig(providerId, t);
 
   useEffect(() => {
@@ -49,12 +48,17 @@ export function OpenAiExtras({ providerId = "codex", t }: Props) {
   const saveProjectId = async () => {
     setBusy(true);
     setError(null);
+    const generation = editGeneration.current;
     try {
       const next = projectId.trim();
       await setProviderWorkspaceId(providerId, next);
       setSavedProjectId(next);
+      window.dispatchEvent(
+        new CustomEvent<string>(PROVIDER_WORKSPACE_ID_SAVED_EVENT, { detail: providerId }),
+      );
     } catch (e) {
-      setError(String(e));
+      // An edit made while the save ran makes its error stale.
+      if (editGeneration.current === generation) setError(String(e));
     } finally {
       setBusy(false);
     }
@@ -73,7 +77,13 @@ export function OpenAiExtras({ providerId = "codex", t }: Props) {
             value={projectId}
             placeholder={config.placeholder}
             spellCheck={false}
-            onChange={(event) => setProjectId(event.target.value)}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? errorId : undefined}
+            onChange={(event) => {
+              editGeneration.current += 1;
+              setProjectId(event.target.value);
+              setError(null);
+            }}
           />
         </label>
         <div className="provider-detail-helper">
@@ -89,22 +99,21 @@ export function OpenAiExtras({ providerId = "codex", t }: Props) {
             {t("Save")}
           </button>
         </div>
-        {error && <div className="provider-detail-error">{error}</div>}
+        {error && (
+          <div id={errorId} className="provider-detail-error">
+            {error}
+          </div>
+        )}
       </section>
     );
   }
 
-  return (
-    <section className="provider-detail-section">
-      <h4>{t("CredentialsSectionTitle")}</h4>
-      <div className="provider-detail-helper">
-        {t("ProviderCodexHistoryHelp")}
-      </div>
-      <div className="provider-detail-helper">
-        {t("CredsOpenAiHistoryHelp")}
-      </div>
-    </section>
-  );
+  return null;
+}
+
+/** Providers that show a workspace, organization or base-URL field next to their key. */
+export function hasWorkspaceExtra(providerId: string): boolean {
+  return WORKSPACE_EXTRA_IDS[providerId] === true;
 }
 
 const WORKSPACE_EXTRA_IDS: Record<string, true> = {
@@ -119,6 +128,10 @@ const WORKSPACE_EXTRA_IDS: Record<string, true> = {
   xai: true,
   fireworks: true,
   gitkraken: true,
+  exa: true,
+  cosmic: true,
+  flora: true,
+  vercel: true,
 };
 
 function extraConfig(providerId: string, t: Props["t"]) {
@@ -199,6 +212,34 @@ function extraConfig(providerId: string, t: Props["t"]) {
         label: "Organization ID (optional)",
         placeholder: "organization-id",
         help: "Adds the organization ID to shared-pool usage requests. Or set GITKRAKEN_ORG_ID.",
+      };
+    case "exa":
+      return {
+        title: t("ExaApiTitle"),
+        label: t("ExaApiKeyIdLabel"),
+        placeholder: t("ExaApiKeyIdPlaceholder"),
+        help: t("ExaApiKeyIdHelp"),
+      };
+    case "cosmic":
+      return {
+        title: t("CosmicProjectIdTitle"),
+        label: t("CosmicProjectIdLabel"),
+        placeholder: t("CosmicProjectIdPlaceholder"),
+        help: t("CosmicProjectIdHelp"),
+      };
+    case "vercel":
+      return {
+        title: t("VercelTeamTitle"),
+        label: t("VercelTeamIdLabel"),
+        placeholder: "team_...",
+        help: t("VercelTeamIdHelp"),
+      };
+    case "flora":
+      return {
+        title: "FLORA workspace",
+        label: "Workspace ID",
+        placeholder: "ws_…",
+        help: "Required. The ws_… ID of the workspace the key can bill. Or set FLORA_WORKSPACE_ID.",
       };
     default:
       return null;

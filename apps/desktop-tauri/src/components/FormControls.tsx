@@ -1,5 +1,6 @@
 import type React from "react";
 import { createContext, useContext, useId } from "react";
+import type { SettingsSnapshot, SettingsUpdate } from "../types/bridge";
 
 // A Field's label and description ids, so the control inside it gets an
 // accessible name without every call site passing `ariaLabel`.
@@ -20,18 +21,21 @@ export function Toggle({
   label,
   ariaLabel,
   disabled,
+  variant = "checkbox",
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label?: string;
   ariaLabel?: string;
   disabled?: boolean;
+  /** "switch" draws the macOS-style switch used by the grouped settings panes. */
+  variant?: "checkbox" | "switch";
 }) {
   const fieldAria = useFieldAria(ariaLabel);
   const input = (
     <input
       type="checkbox"
-      className="toggle"
+      className={variant === "switch" ? "toggle toggle--switch" : "toggle"}
       checked={checked}
       {...(label ? { "aria-label": ariaLabel } : fieldAria)}
       disabled={disabled}
@@ -56,6 +60,7 @@ export function Select({
   disabled,
   ariaLabel,
   minWidth,
+  variant = "box",
 }: {
   value: string;
   options: { value: string; label: string }[];
@@ -63,11 +68,13 @@ export function Select({
   disabled?: boolean;
   ariaLabel?: string;
   minWidth?: number;
+  /** "menu" draws a borderless "Value ⌄" pop-up button like the macOS panes. */
+  variant?: "box" | "menu";
 }) {
   const fieldAria = useFieldAria(ariaLabel);
   return (
     <select
-      className="select"
+      className={variant === "menu" ? "select select--menu" : "select"}
       style={{ minWidth }}
       value={value}
       disabled={disabled}
@@ -152,5 +159,114 @@ export function Field({
       </div>
       {!leading && control}
     </div>
+  );
+}
+
+// ── settings-bound rows ──────────────────────────────────────────────
+
+export interface SettingsControl {
+  settings: SettingsSnapshot;
+  set: (patch: SettingsUpdate) => void;
+  saving: boolean;
+}
+
+type SettingKey<T> = {
+  [K in keyof SettingsUpdate & keyof SettingsSnapshot]-?: NonNullable<SettingsUpdate[K]> extends T
+    ? K
+    : never;
+}[keyof SettingsUpdate & keyof SettingsSnapshot];
+
+/** A leading Field + Toggle that writes one boolean setting; an unset value reads as off. */
+export function SettingToggle({
+  ctl,
+  field,
+  label,
+  description,
+  checked,
+  disabled,
+  ariaLabel,
+}: {
+  ctl: SettingsControl;
+  field: SettingKey<boolean>;
+  label: string;
+  description?: string;
+  checked?: boolean;
+  disabled?: boolean;
+  ariaLabel?: string;
+}) {
+  return (
+    <Field label={label} description={description} leading>
+      <Toggle
+        checked={checked ?? ctl.settings[field] ?? false}
+        ariaLabel={ariaLabel}
+        disabled={disabled ?? ctl.saving}
+        onChange={(v) => ctl.set({ [field]: v })}
+      />
+    </Field>
+  );
+}
+
+/** A Field + Select that writes one string setting; an unset value selects "". */
+export function SettingSelect({
+  ctl,
+  field,
+  label,
+  description,
+  options,
+  value,
+  disabled,
+  ariaLabel,
+}: {
+  ctl: SettingsControl;
+  field: SettingKey<string>;
+  label: string;
+  description?: string;
+  options: { value: string; label: string }[];
+  value?: string;
+  disabled?: boolean;
+  ariaLabel?: string;
+}) {
+  return (
+    <Field label={label} description={description}>
+      <Select
+        value={value ?? ctl.settings[field] ?? ""}
+        disabled={disabled ?? ctl.saving}
+        ariaLabel={ariaLabel}
+        options={options}
+        onChange={(v) => ctl.set({ [field]: v })}
+      />
+    </Field>
+  );
+}
+
+// ── grouped section (macOS grouped Form look) ───────────────────────
+
+/** A bold section title, a rounded box of rows with dividers, and an optional footer. */
+export function SettingsGroup({
+  title,
+  footer,
+  children,
+  className,
+}: {
+  title?: string;
+  footer?: React.ReactNode;
+  children: React.ReactNode;
+  /** Extra classes on the `section` (e.g. a dimmed or provider-detail variant). */
+  className?: string;
+}) {
+  const id = useId();
+  return (
+    <section
+      className={className ? `settings-group ${className}` : "settings-group"}
+      aria-labelledby={title ? `${id}-title` : undefined}
+    >
+      {title && (
+        <h3 id={`${id}-title`} className="settings-group__title">
+          {title}
+        </h3>
+      )}
+      <div className="settings-group__box">{children}</div>
+      {footer && <div className="settings-group__footer">{footer}</div>}
+    </section>
   );
 }

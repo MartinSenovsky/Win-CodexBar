@@ -7,6 +7,7 @@ pub mod agent_sessions;
 pub mod atomic_file;
 pub mod browser;
 pub mod cli;
+pub mod cli_usage_cache;
 pub mod codex_accounts;
 pub mod codex_cli;
 pub mod codex_workspaces;
@@ -28,6 +29,7 @@ pub mod secure_file;
 pub mod settings;
 pub mod sound;
 pub mod spend_contract;
+pub mod spend_trend;
 
 pub mod status;
 pub mod switcher_shortcuts;

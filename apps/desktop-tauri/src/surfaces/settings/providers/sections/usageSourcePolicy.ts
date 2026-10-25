@@ -42,6 +42,11 @@ const POLICIES: Readonly<Record<string, UsageSourcePolicy>> = {
         label: "Local API / agy CLI",
         description: "Uses the local Antigravity app or agy's signed-in account, which may differ from the selected Google account.",
       },
+      {
+        value: "oauth",
+        label: "Google OAuth",
+        description: "Reads quota from the Google API with the Antigravity OAuth credentials saved in ~/.codexbar/antigravity/oauth_creds.json.",
+      },
     ],
   },
   nous: {
@@ -55,6 +60,13 @@ const POLICIES: Readonly<Record<string, UsageSourcePolicy>> = {
       { value: "auto", label: "Auto", description: "Tries the Charm Hyper browser session, then the configured API key." },
       { value: "web", label: "Browser session", description: "Uses the selected hyper.charm.land browser session only." },
       { value: "oauth", label: "API", description: "Uses the configured Charm Hyper API key only." },
+    ],
+  },
+  groq: {
+    options: [
+      { value: "auto", label: "Auto", description: "Tries the console.groq.com browser session, then Enterprise Prometheus metrics with the API key." },
+      { value: "web", label: "Browser session", description: "Uses the console.groq.com browser session or manual cookie header only." },
+      { value: "oauth", label: "API", description: "Uses the configured API key for Enterprise Prometheus metrics only." },
     ],
   },
   zed: {
@@ -81,6 +93,32 @@ const POLICIES: Readonly<Record<string, UsageSourcePolicy>> = {
         descriptionKey: "ProviderZedUsageSourceWebHelp",
       },
     ],
+  },
+  gemini: {
+    options: [
+      {
+        value: "auto",
+        label: "Auto",
+        labelKey: "ProviderSourceAutoShort",
+        description: "Uses the Gemini CLI login; the Gemini app browser session is used only when Gemini app is selected.",
+        descriptionKey: "ProviderGeminiUsageSourceAutoHelp",
+      },
+      {
+        value: "cli",
+        label: "Gemini CLI",
+        labelKey: "ProviderGeminiCli",
+        description: "Uses the Gemini CLI login only.",
+        descriptionKey: "ProviderGeminiUsageSourceCliHelp",
+      },
+      {
+        value: "web",
+        label: "Gemini app",
+        labelKey: "ProviderGeminiApp",
+        description: "Reads the Gemini app 5-hour and weekly limits from the selected gemini.google.com browser session or manual cookie header only, with no Gemini CLI fallback.",
+        descriptionKey: "ProviderGeminiUsageSourceWebHelp",
+      },
+    ],
+    hideCookieSourceValues: ["auto", "cli"],
   },
   gitkraken: {
     options: [
@@ -124,6 +162,26 @@ const POLICIES: Readonly<Record<string, UsageSourcePolicy>> = {
         description: "Reads Venice subscription credits from the selected browser session or manual cookie header.",
       },
     ],
+  },
+  commandcode: {
+    options: [
+      {
+        value: "auto",
+        label: "Auto",
+        description: "Uses the configured Command Code API key, then falls back to browser cookies.",
+      },
+      {
+        value: "oauth",
+        label: "API",
+        description: "Uses the configured Command Code API key only; browser cookies are never read.",
+      },
+      {
+        value: "web",
+        label: "Browser cookies",
+        description: "Uses the commandcode.ai browser session or manual cookie header only.",
+      },
+    ],
+    hideCookieSourceValues: ["oauth"],
   },
 };
 

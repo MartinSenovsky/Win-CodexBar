@@ -9,7 +9,6 @@ const mocks = vi.hoisted(() => ({
   claudeReconciliationState: vi.fn(),
   getSettingsSnapshot: vi.fn(),
   getCurrencyRates: vi.fn(),
-  updateSettings: vi.fn(),
 }));
 const events = vi.hoisted(() => ({
   listen: vi.fn<(event: string, listener: () => void) => Promise<() => void>>(),
@@ -23,6 +22,7 @@ const t = (key: string) => key;
 
 const active: ClaudeSwapAccount = {
   id: "claude-swap:1",
+  source: "claude-swap",
   slot: 1,
   label: "work@example.com",
   email: "work@example.com",
@@ -69,10 +69,7 @@ describe("ClaudeSwapAccountsSection", () => {
     vi.resetAllMocks();
     events.listen.mockResolvedValue(() => {});
     mocks.claudeReconciliationState.mockResolvedValue(null);
-    mocks.getSettingsSnapshot.mockResolvedValue({
-      claudeSwapEnabled: false,
-      claudeSwapExecutablePath: "",
-    });
+    mocks.getSettingsSnapshot.mockResolvedValue({});
     mocks.getCurrencyRates.mockResolvedValue({ rates: { USD: 1, TRY: 48.5 } });
     mocks.claudeSwapAccountsList.mockResolvedValue({
       enabled: false,
@@ -82,30 +79,155 @@ describe("ClaudeSwapAccountsSection", () => {
     });
   });
 
-  it("shows the disabled status and persists an explicit opt-in", async () => {
-    render(<ClaudeSwapAccountsSection t={t} />);
-    await screen.findByText("ClaudeSwapTitle");
-    expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
-    mocks.updateSettings.mockResolvedValue(undefined);
-    mocks.claudeSwapAccountsList.mockResolvedValue(
-      enabledState([active, switchable]),
+  it("renders nothing while claude-swap is off and lists accounts once it is on", async () => {
+    const { container, rerender } = render(
+      <ClaudeSwapAccountsSection t={t} enabled={false} executablePath="" />,
     );
-    await act(async () => fireEvent.click(screen.getByRole("checkbox")));
-    expect(mocks.updateSettings).toHaveBeenCalledWith({ claudeSwapEnabled: true });
+    await act(async () => {});
+    expect(container.innerHTML).toBe("");
+    expect(mocks.claudeSwapAccountsList).not.toHaveBeenCalled();
+
+    mocks.claudeSwapAccountsList.mockResolvedValue(enabledState([active, switchable]));
+    rerender(<ClaudeSwapAccountsSection t={t} enabled executablePath="~/bin/cswap" />);
+    await screen.findByText("work@example.com");
+    expect(screen.getByText("ClaudeSwapTitle")).toBeTruthy();
+    expect(screen.getByText("ClaudeSwapStatusReady")).toBeTruthy();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("reloads the list when the executable path changes", async () => {
+    mocks.claudeSwapAccountsList.mockResolvedValue({
+      enabled: true, executableConfigured: false, accounts: [], error: null,
+    });
+    const { rerender } = render(
+      <ClaudeSwapAccountsSection t={t} enabled executablePath="" />,
+    );
+    await screen.findByText("ClaudeSwapStatusNoExecutable");
+    mocks.claudeSwapAccountsList.mockResolvedValue(enabledState([active]));
+    rerender(<ClaudeSwapAccountsSection t={t} enabled executablePath="C:/tools/cswap.exe" />);
+    await screen.findByText("work@example.com");
+    expect(mocks.claudeSwapAccountsList).toHaveBeenCalledTimes(2);
+  });
+
+  it("reloads the masked labels when Hide personal information changes", async () => {
+    mocks.claudeSwapAccountsList.mockResolvedValue(enabledState([active]));
+    const { rerender } = render(
+      <ClaudeSwapAccountsSection t={t} enabled executablePath="C:/tools/cswap.exe" />,
+    );
+    await screen.findByText("work@example.com");
+
+    mocks.claudeSwapAccountsList.mockResolvedValue(
+      enabledState([{ ...active, label: "Account 1" }]),
+    );
+    rerender(
+      <ClaudeSwapAccountsSection t={t} enabled executablePath="C:/tools/cswap.exe" hidePersonalInfo />,
+    );
+    await screen.findByText("Account 1");
+    expect(screen.queryByText("work@example.com")).toBeNull();
+    expect(mocks.claudeSwapAccountsList).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows each card's own session forecast and none where history is missing", async () => {
+    const forecasted: ClaudeSwapAccount = {
+      ...active,
+      sessionEquivalentForecast: {
+        estimatedWindowsToExhaustWeekly: 3.04,
+        windowsUntilReset: 12,
+        availableWindowsUntilReset: 10,
+        sampleCount: 3,
+        weeklyResetsAt: "2026-09-19T00:00:00Z",
+        weeklyUsedPercent: 30,
+      },
+    };
+    const fresh: ClaudeSwapAccount = { ...switchable, sessionEquivalentForecast: null };
+    mocks.claudeSwapAccountsList.mockResolvedValue(enabledState([forecasted, fresh]));
+    render(<ClaudeSwapAccountsSection t={t} enabled executablePath="C:/tools/cswap.exe" />);
+    const estimate = await screen.findByText("Estimated: 3 session quotas left");
+    expect(estimate.closest("li")?.textContent).toContain("work@example.com");
+    const other = screen.getByText("personal@example.com").closest("li");
+    expect(other?.textContent).not.toContain("Estimated:");
+    expect(screen.getAllByText(/Estimated:/)).toHaveLength(1);
+  });
+
+  it("names tcr in the title, status and empty copy", async () => {
+    mocks.claudeSwapAccountsList.mockResolvedValue({
+      enabled: true, source: "tcr", executableConfigured: false, accounts: [], error: null,
+    });
+    const { rerender } = render(
+      <ClaudeSwapAccountsSection t={t} enabled executablePath="" source="tcr" />,
+    );
+    await screen.findByText("ClaudeTcrStatusNoExecutable");
+    expect(screen.getByText("ClaudeTcrTitle")).toBeTruthy();
+    expect(screen.queryByText("ClaudeSwapTitle")).toBeNull();
+
+    mocks.claudeSwapAccountsList.mockResolvedValue({
+      enabled: true, source: "tcr", executableConfigured: true, accounts: [], error: null,
+    });
+    rerender(<ClaudeSwapAccountsSection t={t} enabled executablePath="C:/tools/tcr.exe" source="tcr" />);
+    await screen.findByText("ClaudeTcrEmpty");
+    expect(screen.getByText("ClaudeTcrStatusReady")).toBeTruthy();
+  });
+
+  it("renders read-only tcr cards without a switch button", async () => {
+    const pooled: ClaudeSwapAccount = {
+      ...switchable,
+      id: "tcr:2",
+      source: "tcr",
+      action: null,
+      isDisabled: true,
+    };
+    mocks.claudeSwapAccountsList.mockResolvedValue({
+      ...enabledState([pooled]),
+      source: "tcr",
+    });
+    render(<ClaudeSwapAccountsSection t={t} enabled executablePath="C:/tools/tcr.exe" source="tcr" />);
+    await screen.findByText("personal@example.com");
+    expect(screen.getByText("ClaudeTcrDisabled")).toBeTruthy();
+    expect(screen.queryByText("ClaudeSwapSwitchButton")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("drops a late claude-swap reply after the source changes to tcr", async () => {
+    let resolveSwap: (state: ClaudeSwapAccountsState) => void = () => {};
+    mocks.claudeSwapAccountsList.mockImplementationOnce(
+      () => new Promise<ClaudeSwapAccountsState>((resolve) => { resolveSwap = resolve; }),
+    );
+    const { rerender } = render(
+      <ClaudeSwapAccountsSection t={t} enabled executablePath="C:/tools/cswap.exe" />,
+    );
+    await act(async () => {});
+    const pooled: ClaudeSwapAccount = {
+      ...switchable,
+      id: "tcr:7",
+      source: "tcr",
+      slot: 7,
+      label: "pool@example.com",
+      action: null,
+    };
+    mocks.claudeSwapAccountsList.mockResolvedValue({
+      ...enabledState([pooled]),
+      source: "tcr",
+    });
+    rerender(
+      <ClaudeSwapAccountsSection t={t} enabled executablePath="C:/tools/cswap.exe" source="tcr" />,
+    );
+    await screen.findByText("pool@example.com");
+
+    await act(async () => resolveSwap(enabledState([active, switchable])));
+    expect(screen.getByText("pool@example.com")).toBeTruthy();
+    expect(screen.queryByText("work@example.com")).toBeNull();
+    expect(screen.queryByText("ClaudeSwapSwitchButton")).toBeNull();
   });
 
   it("switches only actionable inactive accounts and reports success", async () => {
-    mocks.getSettingsSnapshot.mockResolvedValue({
-      claudeSwapEnabled: true,
-      claudeSwapExecutablePath: "~/bin/cswap",
-    });
     mocks.claudeSwapAccountsList.mockResolvedValue(
       enabledState([active, switchable, blocked]),
     );
     mocks.claudeSwapAccountSwitch.mockResolvedValue({
       generation: 1, status: "succeeded", providerRefreshGeneration: 1, detail: "published",
     });
-    render(<ClaudeSwapAccountsSection t={t} />);
+    render(<ClaudeSwapAccountsSection t={t} enabled executablePath="~/bin/cswap" />);
     await screen.findByText("work@example.com");
 
     expect(screen.getByText("TokenAccountActive")).toBeTruthy();
@@ -121,10 +243,6 @@ describe("ClaudeSwapAccountsSection", () => {
   });
 
   it("renders no action button when the adapter is read-only", async () => {
-    mocks.getSettingsSnapshot.mockResolvedValue({
-      claudeSwapEnabled: true,
-      claudeSwapExecutablePath: "~/bin/cswap",
-    });
     // Read-only adapters project `action: null` for every row, including
     // inactive rows that would otherwise be switchable.
     mocks.claudeSwapAccountsList.mockResolvedValue(
@@ -134,7 +252,7 @@ describe("ClaudeSwapAccountsSection", () => {
         { ...active, id: "claude-swap:4", slot: 4, label: "foreign@example.com", status: "foreign_credential", action: null },
       ]),
     );
-    render(<ClaudeSwapAccountsSection t={t} />);
+    render(<ClaudeSwapAccountsSection t={t} enabled executablePath="~/bin/cswap" />);
     await screen.findByText("work@example.com");
 
     expect(screen.getByText("personal@example.com")).toBeTruthy();
@@ -146,51 +264,25 @@ describe("ClaudeSwapAccountsSection", () => {
   });
 
   it("surfaces adapter errors without offering a switch", async () => {
-    mocks.getSettingsSnapshot.mockResolvedValue({
-      claudeSwapEnabled: true,
-      claudeSwapExecutablePath: "~/bin/cswap",
-    });
     mocks.claudeSwapAccountsList.mockResolvedValue({
       enabled: true,
       executableConfigured: true,
       accounts: [],
       error: "claude-swap did not respond within 30 seconds.",
     });
-    render(<ClaudeSwapAccountsSection t={t} />);
+    render(<ClaudeSwapAccountsSection t={t} enabled executablePath="~/bin/cswap" />);
     await waitFor(() =>
       expect(screen.getByRole("alert").textContent).toContain("did not respond"),
     );
     expect(screen.queryByText("ClaudeSwapSwitchButton")).toBeNull();
   });
 
-  it("allows retrying the same executable path after a failed save", async () => {
-    render(<ClaudeSwapAccountsSection t={t} />);
-    await act(async () => {});
-    const input = screen.getByRole("textbox");
-    mocks.updateSettings.mockRejectedValueOnce("Save failed.");
-    await act(async () => {
-      fireEvent.change(input, { target: { value: "C:/tools/cswap.exe" } });
-      fireEvent.blur(input);
-    });
-    expect(screen.getByRole("alert").textContent).toContain("Save failed.");
-    mocks.updateSettings.mockResolvedValueOnce(undefined);
-    await act(async () => fireEvent.blur(input));
-    expect(mocks.updateSettings).toHaveBeenCalledTimes(2);
-    expect(mocks.updateSettings).toHaveBeenLastCalledWith({
-      claudeSwapExecutablePath: "C:/tools/cswap.exe",
-    });
-  });
-
   it("shows a switch failure without claiming success", async () => {
-    mocks.getSettingsSnapshot.mockResolvedValue({
-      claudeSwapEnabled: true,
-      claudeSwapExecutablePath: "~/bin/cswap",
-    });
     mocks.claudeSwapAccountsList.mockResolvedValue(
       enabledState([active, switchable]),
     );
     mocks.claudeSwapAccountSwitch.mockRejectedValue("cswap failed.");
-    render(<ClaudeSwapAccountsSection t={t} />);
+    render(<ClaudeSwapAccountsSection t={t} enabled executablePath="~/bin/cswap" />);
     await screen.findByText("personal@example.com");
     await act(async () =>
       fireEvent.click(screen.getByText("ClaudeSwapSwitchButton")),
@@ -206,15 +298,11 @@ describe("ClaudeSwapAccountsSection", () => {
       action: "reauthenticate",
       error: "claude-swap reports the live credential belongs to a different account.",
     };
-    mocks.getSettingsSnapshot.mockResolvedValue({
-      claudeSwapEnabled: true,
-      claudeSwapExecutablePath: "~/bin/cswap",
-    });
     mocks.claudeSwapAccountsList.mockResolvedValue(enabledState([foreign]));
     mocks.claudeSwapAccountReauthenticate.mockResolvedValue({
       generation: 2, status: "succeeded", providerRefreshGeneration: 2, detail: "published",
     });
-    render(<ClaudeSwapAccountsSection t={t} />);
+    render(<ClaudeSwapAccountsSection t={t} enabled executablePath="~/bin/cswap" />);
     await screen.findByText("work@example.com");
     await act(async () =>
       fireEvent.click(screen.getByText("ClaudeSwapReauthenticateButton")),
@@ -222,6 +310,35 @@ describe("ClaudeSwapAccountsSection", () => {
     expect(mocks.claudeSwapAccountReauthenticate).toHaveBeenCalledWith(1);
     expect(screen.getByRole("status").textContent).toBe("ClaudeSwapReauthenticated");
     expect(mocks.claudeSwapAccountSwitch).not.toHaveBeenCalled();
+  });
+
+  it("names quota percents as left by default and as used when the setting asks", async () => {
+    const account: ClaudeSwapAccount = {
+      ...active,
+      scoped: [{ name: "Opus", usedPercent: 30, resetsAt: null }],
+      historicalUsage: {
+        fiveHour: { usedPercent: 44, resetsAt: null },
+        sevenDay: null,
+        scoped: [],
+        spend: null,
+        fetchedAt: "2026-09-12T00:45:00Z",
+        provenance: "source_reported_last_good",
+      },
+    };
+    mocks.claudeSwapAccountsList.mockResolvedValue(enabledState([account]));
+    const { rerender } = render(
+      <ClaudeSwapAccountsSection t={t} enabled executablePath="~/bin/cswap" />,
+    );
+    await screen.findByText("ProviderSession 88% PanelLeftSuffix \u00b7 Opus 70% PanelLeftSuffix");
+    expect(screen.getByText(/ClaudeSwapHistoricalUsage: ProviderSession 56% PanelLeftSuffix/)).toBeTruthy();
+    expect(screen.queryByText(/PanelUsedSuffix/)).toBeNull();
+
+    rerender(
+      <ClaudeSwapAccountsSection t={t} enabled executablePath="~/bin/cswap" showAsUsed />,
+    );
+    await screen.findByText("ProviderSession 12% PanelUsedSuffix \u00b7 Opus 30% PanelUsedSuffix");
+    expect(screen.getByText(/ClaudeSwapHistoricalUsage: ProviderSession 44% PanelUsedSuffix/)).toBeTruthy();
+    expect(screen.queryByText(/PanelLeftSuffix/)).toBeNull();
   });
 
   it("renders disabled, spend, and display-only historical usage details", async () => {
@@ -250,15 +367,11 @@ describe("ClaudeSwapAccountsSection", () => {
         provenance: "source_reported_last_good",
       },
     };
-    mocks.getSettingsSnapshot.mockResolvedValue({
-      claudeSwapEnabled: true,
-      claudeSwapExecutablePath: "~/bin/cswap",
-      preferredCurrencyCode: "TRY",
-    });
+    mocks.getSettingsSnapshot.mockResolvedValue({ preferredCurrencyCode: "TRY" });
     mocks.claudeSwapAccountsList.mockResolvedValue(enabledState([account]));
     render(
       <CurrencyProvider>
-        <ClaudeSwapAccountsSection t={t} />
+        <ClaudeSwapAccountsSection t={t} enabled executablePath="~/bin/cswap" />
       </CurrencyProvider>,
     );
     await screen.findByText("personal@example.com");

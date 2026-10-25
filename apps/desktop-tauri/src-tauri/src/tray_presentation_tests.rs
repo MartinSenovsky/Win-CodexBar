@@ -1,11 +1,16 @@
 use super::*;
-use codexbar::core::{ProviderId, ProviderStateKind};
+use codexbar::core::ProviderId;
+use codexbar::tray::render_stacked_bars_icon_rgba_with_pace;
 
-fn fake_snapshot(id: &str, display_name: &str, used_percent: f64) -> ProviderUsageSnapshot {
+pub(crate) fn fake_snapshot(
+    id: &str,
+    display_name: &str,
+    used_percent: f64,
+) -> ProviderUsageSnapshot {
     fake_snapshot_with(id, display_name, used_percent, None, None, None)
 }
 
-fn fake_snapshot_with(
+pub(crate) fn fake_snapshot_with(
     id: &str,
     display_name: &str,
     used_percent: f64,
@@ -16,32 +21,18 @@ fn fake_snapshot_with(
     let window = |percent: f64| RateWindowSnapshot {
         used_percent: percent,
         remaining_percent: 100.0 - percent,
-        window_minutes: None,
-        resets_at: None,
-        reset_description: None,
-        is_exhausted: false,
-        is_informational: false,
-        reserve_percent: None,
-        reserve_description: None,
-        reserve_will_last_to_reset: false,
-        reserve_eta_seconds: None,
-        monthly_limit_block: None,
-        description_is_detail: false,
+        ..Default::default()
     };
 
     ProviderUsageSnapshot {
         provider_id: id.into(),
         display_name: display_name.into(),
         primary: window(used_percent),
-        primary_label: None,
         secondary: secondary_percent.map(window),
         secondary_label: None,
+        secondary_label_key: None,
         model_specific: None,
         tertiary: tertiary_percent.map(window),
-        tertiary_label: None,
-        extra_rate_windows: Vec::new(),
-        inventory: Vec::new(),
-        display_details: Vec::new(),
         cost: cost.map(|(used, limit)| crate::commands::CostSnapshotBridge {
             used,
             limit: Some(limit),
@@ -58,23 +49,12 @@ fn fake_snapshot_with(
             account_id: None,
             daily: Vec::new(),
             always_visible: false,
+            folded_into_primary: false,
+            title_key: None,
         }),
-        plan_name: None,
-        account_email: None,
-        subscription: None,
-        source_label: String::new(),
-        has_successful_claude_cli_quota: false,
+        pace_authoritative: true,
         updated_at: "2025-01-01T00:00:00Z".into(),
-        error: None,
-        error_state: ProviderStateKind::Ready,
-        pace: None,
-        account_organization: None,
-        open_ai_api_usage: None,
-        tray_status_label: None,
-        fetch_duration_ms: None,
-        wayfinder_usage: None,
-        session_equivalent_forecast: None,
-        quota_burndown: None,
+        ..Default::default()
     }
 }
 
@@ -83,6 +63,7 @@ fn single_plan_uses_highest_provider_for_icon_and_summary() {
     let settings = Settings {
         tray_icon_mode: TrayIconMode::Single,
         menu_bar_shows_highest_usage: true,
+        show_as_used: true,
         ..Settings::default()
     };
     let snapshots = vec![
@@ -98,11 +79,12 @@ fn single_plan_uses_highest_provider_for_icon_and_summary() {
             primary_percent: 72.0,
             secondary_percent: None,
             has_error: false,
+            provider_tint: None,
         }
     );
     assert_eq!(
         plan.status_labels(Language::English),
-        vec![("status_summary".to_string(), "Claude 72%".to_string())]
+        vec![("status_summary".to_string(), "Claude 72% used".to_string())]
     );
 }
 
@@ -145,8 +127,8 @@ fn per_provider_plan_preserves_configured_order_for_status_rows() {
     assert_eq!(
         labels,
         vec![
-            ("claude".to_string(), "Claude 72%".to_string()),
-            ("codex".to_string(), "Codex 30%".to_string()),
+            ("claude".to_string(), "Claude 28% left".to_string()),
+            ("codex".to_string(), "Codex 70% left".to_string()),
         ]
     );
 }
@@ -157,6 +139,7 @@ fn stacked_plan_resolves_distinct_preferences_once() {
         tray_icon_mode: TrayIconMode::Stacked,
         stacked_tray_top_provider: Some("claude".to_string()),
         stacked_tray_bottom_provider: Some("codex".to_string()),
+        show_as_used: true,
         ..Settings::default()
     };
     let snapshots = vec![
@@ -173,13 +156,15 @@ fn stacked_plan_resolves_distinct_preferences_once() {
             top_percent: 72.0,
             bottom_percent: 30.0,
             has_error: false,
+            top_tint: None,
+            bottom_tint: None,
         }
     );
     assert_eq!(
         plan.status_labels(Language::English),
         vec![
-            ("claude".to_string(), "Claude 72%".to_string()),
-            ("codex".to_string(), "Codex 30%".to_string()),
+            ("claude".to_string(), "Claude 72% used".to_string()),
+            ("codex".to_string(), "Codex 30% used".to_string()),
         ]
     );
 }
@@ -211,6 +196,7 @@ fn stacked_plan_falls_back_around_stale_and_duplicate_preferences() {
         tray_icon_mode: TrayIconMode::Stacked,
         stacked_tray_top_provider: Some("missing".to_string()),
         stacked_tray_bottom_provider: Some("claude".to_string()),
+        show_as_used: true,
         ..Settings::default()
     };
     let snapshots = vec![
@@ -226,6 +212,8 @@ fn stacked_plan_falls_back_around_stale_and_duplicate_preferences() {
             top_percent: 30.0,
             bottom_percent: 72.0,
             has_error: false,
+            top_tint: None,
+            bottom_tint: None,
         }
     );
     assert_eq!(plan.status_rows[0].snapshot.provider_id, "codex");
@@ -236,6 +224,7 @@ fn stacked_plan_falls_back_around_stale_and_duplicate_preferences() {
 fn one_provider_stacked_mode_falls_back_to_single_provider_bars() {
     let settings = Settings {
         tray_icon_mode: TrayIconMode::Stacked,
+        show_as_used: true,
         ..Settings::default()
     };
     let snapshots = vec![fake_snapshot_with(
@@ -255,6 +244,7 @@ fn one_provider_stacked_mode_falls_back_to_single_provider_bars() {
             primary_percent: 65.0,
             secondary_percent: Some(30.0),
             has_error: false,
+            provider_tint: None,
         }
     );
     assert_eq!(plan.status_rows.len(), 1);
@@ -264,7 +254,8 @@ fn one_provider_stacked_mode_falls_back_to_single_provider_bars() {
 fn one_healthy_provider_never_uses_stacked_renderer() {
     let settings = Settings {
         tray_icon_mode: TrayIconMode::Stacked,
-        menu_bar_shows_percent: true,
+        menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::Percent,
+        show_as_used: true,
         ..Settings::default()
     };
     let healthy = fake_snapshot("codex", "Codex", 30.0);
@@ -279,6 +270,8 @@ fn one_healthy_provider_never_uses_stacked_renderer() {
         TrayIconPlan::Percent {
             percent: 30.0,
             has_error: false,
+            provider_tint: None,
+            estimated: false,
         }
     );
     assert_eq!(plan.status_rows.len(), 1);
@@ -288,7 +281,7 @@ fn one_healthy_provider_never_uses_stacked_renderer() {
 #[test]
 fn all_errors_produce_error_styled_zero_percent_plan() {
     let settings = Settings {
-        menu_bar_shows_percent: true,
+        menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::Percent,
         ..Settings::default()
     };
     let mut snapshot = fake_snapshot("codex", "Codex", 30.0);
@@ -302,6 +295,8 @@ fn all_errors_produce_error_styled_zero_percent_plan() {
         TrayIconPlan::Percent {
             percent: 0.0,
             has_error: true,
+            provider_tint: None,
+            estimated: false,
         }
     );
     assert!(plan.status_rows.is_empty());
@@ -331,6 +326,7 @@ fn plan_uses_selected_metric_and_remaining_display_mode() {
             primary_percent: 85.0,
             secondary_percent: Some(80.0),
             has_error: false,
+            provider_tint: None,
         }
     );
 }
@@ -341,6 +337,7 @@ fn render_icon_delegates_to_resolved_stacked_renderer() {
         tray_icon_mode: TrayIconMode::Stacked,
         stacked_tray_top_provider: Some("claude".to_string()),
         stacked_tray_bottom_provider: Some("codex".to_string()),
+        show_as_used: true,
         ..Settings::default()
     };
     let snapshots = vec![
@@ -351,7 +348,7 @@ fn render_icon_delegates_to_resolved_stacked_renderer() {
 
     assert_eq!(
         plan.render_icon(),
-        render_stacked_bar_icon_rgba(72.0, 40.0, false)
+        render_stacked_bar_icon_rgba_tinted(72.0, 40.0, false, None, None)
     );
 }
 
@@ -362,6 +359,13 @@ fn codex_headline_skips_informational_primary() {
 
     assert_eq!(codex_lane_headline_window(&snapshot).used_percent, 25.0);
 }
+fn used_view_settings() -> Settings {
+    Settings {
+        show_as_used: true,
+        ..Settings::default()
+    }
+}
+
 fn fake_extra_window(percent: f64) -> crate::commands::NamedRateWindowSnapshot {
     crate::commands::NamedRateWindowSnapshot {
         id: "additional_budget".to_string(),
@@ -371,24 +375,14 @@ fn fake_extra_window(percent: f64) -> crate::commands::NamedRateWindowSnapshot {
         window: crate::commands::RateWindowSnapshot {
             used_percent: percent,
             remaining_percent: 100.0 - percent,
-            window_minutes: None,
-            resets_at: None,
-            reset_description: None,
-            is_exhausted: false,
-            is_informational: false,
-            reserve_percent: None,
-            reserve_description: None,
-            reserve_will_last_to_reset: false,
-            reserve_eta_seconds: None,
-            monthly_limit_block: None,
-            description_is_detail: false,
+            ..Default::default()
         },
     }
 }
 
 #[test]
 fn selected_tray_percent_uses_cursor_extra_usage_cost() {
-    let mut settings = Settings::default();
+    let mut settings = used_view_settings();
     settings.set_provider_metric(ProviderId::Cursor, MetricPreference::ExtraUsage);
     let snapshot = fake_snapshot_with(
         "cursor",
@@ -407,7 +401,7 @@ fn selected_tray_percent_uses_cursor_extra_usage_cost() {
 
 #[test]
 fn selected_tray_percent_tracks_extra_rate_window() {
-    let mut settings = Settings::default();
+    let mut settings = used_view_settings();
     settings.set_provider_metric(ProviderId::Copilot, MetricPreference::ExtraUsage);
     let mut snapshot = fake_snapshot("copilot", "Copilot", 20.0);
     snapshot.extra_rate_windows.push(fake_extra_window(42.0));
@@ -420,7 +414,7 @@ fn selected_tray_percent_tracks_extra_rate_window() {
 
 #[test]
 fn copilot_automatic_tracks_highest_extra_rate_window() {
-    let settings = Settings::default();
+    let settings = used_view_settings();
     let mut snapshot = fake_snapshot("copilot", "Copilot", 20.0);
     snapshot.extra_rate_windows.push(fake_extra_window(42.0));
 
@@ -523,7 +517,7 @@ fn missing_automatic_window_does_not_look_like_available_remaining_progress() {
 
 #[test]
 fn selected_tray_percent_falls_back_when_extra_usage_missing() {
-    let mut settings = Settings::default();
+    let mut settings = used_view_settings();
     settings.set_provider_metric(ProviderId::Cursor, MetricPreference::ExtraUsage);
     let snapshot = fake_snapshot_with("cursor", "Cursor", 10.0, Some(72.0), None, None);
 
@@ -534,7 +528,7 @@ fn selected_tray_percent_falls_back_when_extra_usage_missing() {
 
 #[test]
 fn single_meaningful_secondary_quota_uses_full_single_meter() {
-    let settings = Settings::default();
+    let settings = used_view_settings();
     let mut snapshot = fake_snapshot_with("claude", "Claude", 0.0, Some(42.0), None, None);
     snapshot.primary.is_informational = true;
 
@@ -546,7 +540,7 @@ fn single_meaningful_secondary_quota_uses_full_single_meter() {
 
 #[test]
 fn selected_secondary_quota_is_not_duplicated_when_tertiary_is_meaningful() {
-    let settings = Settings::default();
+    let settings = used_view_settings();
     let mut snapshot = fake_snapshot_with("claude", "Claude", 0.0, Some(42.0), Some(30.0), None);
     snapshot.primary.is_informational = true;
 
@@ -558,7 +552,7 @@ fn selected_secondary_quota_is_not_duplicated_when_tertiary_is_meaningful() {
 
 #[test]
 fn two_meaningful_quotas_keep_two_meter_layout() {
-    let mut settings = Settings::default();
+    let mut settings = used_view_settings();
     settings.set_provider_metric(ProviderId::Cursor, MetricPreference::Session);
     let snapshot = fake_snapshot_with("cursor", "Cursor", 15.0, Some(40.0), None, None);
 
@@ -570,7 +564,7 @@ fn two_meaningful_quotas_keep_two_meter_layout() {
 
 #[test]
 fn informational_primary_skips_session_and_automatic_phantom_zero() {
-    let mut settings = Settings::default();
+    let mut settings = used_view_settings();
     settings.set_provider_metric(ProviderId::Claude, MetricPreference::Session);
     let mut snapshot = fake_snapshot_with("claude", "Claude", 0.0, Some(42.0), None, None);
     snapshot.primary.is_informational = true;
@@ -589,22 +583,14 @@ fn informational_primary_skips_session_and_automatic_phantom_zero() {
 
 #[test]
 fn claude_automatic_prefers_weekly_when_model_exhausted() {
-    let settings = Settings::default();
+    let settings = used_view_settings();
     let mut snapshot = fake_snapshot_with("claude", "Claude", 40.0, Some(22.0), None, None);
     snapshot.model_specific = Some(crate::commands::RateWindowSnapshot {
         used_percent: 100.0,
         remaining_percent: 0.0,
         window_minutes: Some(10080),
-        resets_at: None,
-        reset_description: None,
         is_exhausted: true,
-        is_informational: false,
-        reserve_percent: None,
-        reserve_description: None,
-        reserve_will_last_to_reset: false,
-        reserve_eta_seconds: None,
-        monthly_limit_block: None,
-        description_is_detail: false,
+        ..Default::default()
     });
 
     let (primary, _) = selected_tray_percents(&snapshot, &settings);
@@ -619,7 +605,7 @@ fn claude_automatic_prefers_weekly_when_model_exhausted() {
 
 #[test]
 fn automatic_prefers_exhausted_weekly_over_low_session() {
-    let settings = Settings::default();
+    let settings = used_view_settings();
     let snapshot = fake_snapshot_with("codex", "Codex", 20.0, Some(100.0), None, None);
 
     let (primary, _) = selected_tray_percents(&snapshot, &settings);
@@ -634,22 +620,12 @@ fn automatic_prefers_exhausted_weekly_over_low_session() {
 
 #[test]
 fn automatic_picks_highest_among_model_and_extra_windows() {
-    let settings = Settings::default();
-    let mut snapshot = fake_snapshot_with("gemini", "Gemini", 10.0, Some(30.0), Some(40.0), None);
+    let settings = used_view_settings();
+    let mut snapshot = fake_snapshot_with("factory", "Droid", 10.0, Some(30.0), Some(40.0), None);
     snapshot.model_specific = Some(crate::commands::RateWindowSnapshot {
         used_percent: 55.0,
         remaining_percent: 45.0,
-        window_minutes: None,
-        resets_at: None,
-        reset_description: None,
-        is_exhausted: false,
-        is_informational: false,
-        reserve_percent: None,
-        reserve_description: None,
-        reserve_will_last_to_reset: false,
-        reserve_eta_seconds: None,
-        monthly_limit_block: None,
-        description_is_detail: false,
+        ..Default::default()
     });
     snapshot.extra_rate_windows.push(fake_extra_window(90.0));
 
@@ -696,97 +672,1042 @@ fn f5_headline_returns_primary_when_all_informational() {
     assert!(headline.is_informational);
 }
 
+fn pace_now() -> chrono::DateTime<chrono::Utc> {
+    "2026-10-12T12:00:00Z".parse().expect("fixed now")
+}
+
+/// A `minutes`-long window that resets `reset_in` minutes after `pace_now`.
+fn paced_window(used: f64, minutes: Option<u32>, reset_in: i64) -> RateWindowSnapshot {
+    let mut window = fake_snapshot("claude", "Claude", used).primary;
+    window.window_minutes = minutes;
+    window.resets_at = Some((pace_now() + chrono::Duration::minutes(reset_in)).to_rfc3339());
+    window
+}
+
+fn paced_snapshot(id: &str, primary: RateWindowSnapshot) -> ProviderUsageSnapshot {
+    let mut snapshot = fake_snapshot(id, id, primary.used_percent);
+    snapshot.primary = primary;
+    snapshot
+}
+
+/// Work days stay off: work-day progress follows the machine time zone.
+fn tint_settings() -> Settings {
+    Settings {
+        menu_bar_color_pace: true,
+        weekly_progress_work_days: None,
+        ..Settings::default()
+    }
+}
+
+fn tint(settings: &Settings, snapshots: &[ProviderUsageSnapshot]) -> Option<TrayPaceColor> {
+    TrayPresentationPlan::resolve_at(settings, snapshots, None, pace_now()).icon_pace
+}
+
+fn render_at(settings: &Settings, snapshots: &[ProviderUsageSnapshot]) -> (Vec<u8>, u32, u32) {
+    TrayPresentationPlan::resolve_at(settings, snapshots, None, pace_now()).render_icon()
+}
+
+/// Half way through a five-hour window the expected use is 50%.
 #[test]
-fn tray_pace_color_is_opt_in_and_follows_canonical_stage() {
-    let pace = |stage: &str, delta_percent: f64| crate::commands::PaceSnapshot {
-        stage: stage.to_string(),
-        delta_percent,
-        will_last_to_reset: true,
-        eta_seconds: None,
-        expected_used_percent: 40.0,
-        actual_used_percent: 32.0,
-        monthly_limit_block: None,
-    };
-    let with_pace = |pace: Option<crate::commands::PaceSnapshot>| {
-        let mut snapshot = fake_snapshot("codex", "Codex", 50.0);
-        snapshot.pace = pace;
-        vec![snapshot]
-    };
-    let default_settings = Settings::default();
-    let colored_settings = Settings {
-        menu_bar_color_pace: true,
-        ..Settings::default()
-    };
-    let colored_percent_settings = Settings {
-        menu_bar_color_pace: true,
-        menu_bar_shows_percent: true,
-        ..Settings::default()
-    };
-    let render = |settings: &Settings, snapshots: &[ProviderUsageSnapshot]| {
-        TrayPresentationPlan::resolve(settings, snapshots, None).render_icon()
+fn tray_pace_tint_is_opt_in_and_follows_the_drawn_window_stage() {
+    let behind = vec![paced_snapshot("claude", paced_window(30.0, Some(300), 150))];
+    let ahead = vec![paced_snapshot("claude", paced_window(70.0, Some(300), 150))];
+    let on_track = vec![paced_snapshot("claude", paced_window(51.0, Some(300), 150))];
+    let colored = tint_settings();
+    let plain = Settings {
+        menu_bar_color_pace: false,
+        ..tint_settings()
     };
 
-    let unpaced = with_pace(None);
-    let behind_snapshots = with_pace(Some(pace("behind", -8.0)));
-    let ahead_snapshots = with_pace(Some(pace("ahead", 8.0)));
-    let on_track_snapshots = with_pace(Some(pace("on_track", 1.0)));
+    assert_eq!(tint(&colored, &behind), Some(TrayPaceColor::Behind));
+    assert_eq!(tint(&colored, &ahead), Some(TrayPaceColor::Ahead));
+    assert_eq!(tint(&colored, &on_track), None);
+    assert_eq!(tint(&plain, &ahead), None);
 
-    let normal = render(&default_settings, &unpaced);
-    let disabled = render(&default_settings, &behind_snapshots);
-    let behind = render(&colored_settings, &behind_snapshots);
-    let ahead = render(&colored_settings, &ahead_snapshots);
-    let on_track = render(&colored_settings, &on_track_snapshots);
+    for style in [
+        codexbar::settings::MenuBarIconStyle::Bars,
+        codexbar::settings::MenuBarIconStyle::Percent,
+    ] {
+        let colored = Settings {
+            menu_bar_icon_style: style,
+            ..tint_settings()
+        };
+        let plain = Settings {
+            menu_bar_color_pace: false,
+            ..colored.clone()
+        };
+        let plain_behind = render_at(&plain, &behind);
+        let tinted_behind = render_at(&colored, &behind);
+        // An on-track 51% icon differs from a 30% one only by usage, so
+        // compare tinted and untinted icons for the same usage.
+        assert_eq!(render_at(&plain, &on_track), render_at(&colored, &on_track));
+        assert_ne!(plain_behind, tinted_behind);
+        assert_ne!(
+            render_at(&colored, &ahead),
+            render_at(&plain, &ahead),
+            "{style:?} ahead"
+        );
+    }
+}
 
-    assert_eq!(normal, disabled);
-    assert_eq!(normal, on_track);
-    assert_ne!(normal, behind);
-    assert_ne!(behind, ahead);
+/// Upstream `menuBarPaceWindow` paces the selected metric window
+/// (`percentWindow`), not the session lane.
+#[test]
+fn tray_pace_tint_follows_the_selected_metric_lane() {
+    let mut snapshot = paced_snapshot("claude", paced_window(30.0, Some(300), 150));
+    snapshot.secondary = Some(paced_window(70.0, Some(10_080), 5_040));
+    let snapshots = vec![snapshot];
 
-    let percent_normal = render(
-        &Settings {
-            menu_bar_shows_percent: true,
-            ..Settings::default()
-        },
-        &unpaced,
+    let mut weekly = tint_settings();
+    weekly.set_provider_metric(ProviderId::Claude, MetricPreference::Weekly);
+    assert_eq!(tint(&weekly, &snapshots), Some(TrayPaceColor::Ahead));
+
+    let mut session = tint_settings();
+    session.set_provider_metric(ProviderId::Claude, MetricPreference::Session);
+    assert_eq!(tint(&session, &snapshots), Some(TrayPaceColor::Behind));
+
+    // Claude's Automatic metric draws the fuller lane, the weekly one here.
+    assert_eq!(
+        tint(&tint_settings(), &snapshots),
+        Some(TrayPaceColor::Ahead)
     );
-    let percent_behind = render(&colored_percent_settings, &behind_snapshots);
-    assert_ne!(percent_normal, percent_behind);
+}
+
+/// Upstream `menuBarPaceWindow` paces Codex on its weekly lane whatever
+/// metric the menu bar shows; no weekly lane means no pace.
+#[test]
+fn codex_tray_pace_tint_uses_its_weekly_lane() {
+    let mut snapshot = paced_snapshot("codex", paced_window(30.0, Some(300), 150));
+    snapshot.secondary = Some(paced_window(70.0, Some(10_080), 5_040));
+    let mut session = tint_settings();
+    session.set_provider_metric(ProviderId::Codex, MetricPreference::Session);
+    assert_eq!(tint(&session, &[snapshot]), Some(TrayPaceColor::Ahead));
+
+    let session_only = paced_snapshot("codex", paced_window(70.0, Some(300), 150));
+    assert_eq!(tint(&session, &[session_only]), None);
+}
+
+/// Upstream `UsageStore.weeklyPace` (UsageStore+HistoricalPace.swift:8-64):
+/// no pace without a length, without pace authority, with no quota left, or
+/// when it expects less than 3% use.
+#[test]
+fn tray_pace_tint_follows_the_mac_weekly_pace_guards() {
+    let colored = tint_settings();
+
+    let lengthless = vec![paced_snapshot("copilot", paced_window(70.0, None, 150))];
+    assert_eq!(tint(&colored, &lengthless), None);
+
+    let mut estimated = paced_snapshot("claude", paced_window(70.0, Some(300), 150));
+    estimated.pace_authoritative = false;
+    assert_eq!(tint(&colored, &[estimated]), None);
+
+    let exhausted = vec![paced_snapshot(
+        "claude",
+        paced_window(100.0, Some(300), 150),
+    )];
+    assert_eq!(tint(&colored, &exhausted), None);
+
+    // 5 of 300 minutes gone: 1.7% expected. 10 gone: 3.3% expected.
+    let too_early = vec![paced_snapshot("claude", paced_window(40.0, Some(300), 295))];
+    assert_eq!(tint(&colored, &too_early), None);
+    let early = vec![paced_snapshot("claude", paced_window(40.0, Some(300), 290))];
+    assert_eq!(tint(&colored, &early), Some(TrayPaceColor::Ahead));
+}
+
+/// A provider-declared icon lane (Doubao's Agent Plan) is the drawn window,
+/// so it drives the tint.
+#[test]
+fn tray_pace_tint_uses_the_icon_fallback_window() {
+    let mut snapshot = paced_snapshot("doubao", paced_window(0.0, None, 150));
+    snapshot.primary.is_informational = true;
+    snapshot
+        .extra_rate_windows
+        .push(crate::commands::NamedRateWindowSnapshot {
+            id: "doubao-agent-plan".to_string(),
+            title: "Agent Plan".to_string(),
+            window: paced_window(70.0, Some(300), 150),
+            fallback_lane: false,
+            icon_fallback: Some(codexbar::core::IconLane::Primary),
+        });
+    assert_eq!(
+        tint(&tint_settings(), &[snapshot]),
+        Some(TrayPaceColor::Ahead)
+    );
+}
+
+/// The Mac menu bar paces a regenerating window that has a length; only the
+/// card swaps its pace for the regen line.
+#[test]
+fn tray_pace_tint_scores_a_regenerating_window_with_a_length() {
+    let mut window = paced_window(70.0, Some(300), 150);
+    window.reset_regenerates = true;
+    let snapshots = vec![paced_snapshot("synthetic", window)];
+    assert_eq!(
+        tint(&tint_settings(), &snapshots),
+        Some(TrayPaceColor::Ahead)
+    );
 }
 
 #[test]
 fn stacked_tray_icon_keeps_usage_colours_when_pace_tint_is_enabled() {
-    let mut codex = fake_snapshot("codex", "Codex", 50.0);
-    codex.pace = Some(crate::commands::PaceSnapshot {
-        stage: "far_ahead".to_string(),
-        delta_percent: 20.0,
-        will_last_to_reset: false,
-        eta_seconds: None,
-        expected_used_percent: 30.0,
-        actual_used_percent: 50.0,
-        monthly_limit_block: None,
-    });
-    let claude = fake_snapshot("claude", "Claude", 20.0);
-    let snapshots = vec![codex.clone(), claude.clone()];
-    let unpaced = vec![
-        ProviderUsageSnapshot {
-            pace: None,
-            ..codex
-        },
-        claude,
-    ];
+    let mut codex = paced_snapshot("codex", paced_window(50.0, Some(300), 150));
+    codex.secondary = Some(paced_window(90.0, Some(10_080), 5_040));
+    let claude = paced_snapshot("claude", paced_window(80.0, Some(300), 150));
+    let snapshots = vec![codex, claude];
+    // Both providers are ahead of pace, so the single icon would tint.
+    assert_eq!(
+        tint(&tint_settings(), &snapshots),
+        Some(TrayPaceColor::Ahead)
+    );
     let stacked = |color_pace: bool| Settings {
         tray_icon_mode: TrayIconMode::Stacked,
         menu_bar_color_pace: color_pace,
-        ..Settings::default()
+        ..tint_settings()
     };
 
     let stacked_settings = stacked(true);
-    let plan = TrayPresentationPlan::resolve(&stacked_settings, &snapshots, None);
+    let plan = TrayPresentationPlan::resolve_at(&stacked_settings, &snapshots, None, pace_now());
     assert!(matches!(plan.icon, TrayIconPlan::Stacked { .. }));
     assert_eq!(plan.icon_pace, None);
-    let unpaced_settings = stacked(false);
+    assert_eq!(plan.render_icon(), render_at(&stacked(false), &snapshots));
+}
+
+#[test]
+fn icon_style_not_the_legacy_percent_flag_picks_the_renderer() {
+    let snapshots = vec![fake_snapshot("codex", "Codex", 30.0)];
+    let bars = Settings {
+        menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::Bars,
+        menu_bar_shows_percent: true,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    assert!(matches!(
+        TrayPresentationPlan::resolve(&bars, &snapshots, None).icon,
+        TrayIconPlan::Bars { .. }
+    ));
+    let percent = Settings {
+        menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::Percent,
+        menu_bar_shows_percent: false,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    assert_eq!(
+        TrayPresentationPlan::resolve(&percent, &snapshots, None).icon,
+        TrayIconPlan::Percent {
+            percent: 30.0,
+            has_error: false,
+            provider_tint: None,
+            estimated: false,
+        }
+    );
+
+    // The two styles draw different tray pixels for the same usage.
+    let (bar_pixels, bar_w, bar_h) =
+        TrayPresentationPlan::resolve(&bars, &snapshots, None).render_icon();
+    let (percent_pixels, percent_w, percent_h) =
+        TrayPresentationPlan::resolve(&percent, &snapshots, None).render_icon();
+    assert_eq!((bar_w, bar_h), (percent_w, percent_h));
+    let changed = bar_pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(percent_pixels.as_chunks::<4>().0.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        changed > 0,
+        "bars and percent icons rendered identical pixels"
+    );
+}
+
+#[test]
+fn retired_minimal_display_mode_no_longer_forces_most_used_provider() {
+    // After the one-shot fold, turning "Show most-used provider" off must win.
+    let settings = Settings {
+        tray_icon_mode: TrayIconMode::Single,
+        menu_bar_display_mode: "minimal".to_string(),
+        menu_bar_shows_highest_usage: false,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    let snapshots = vec![
+        fake_snapshot("codex", "Codex", 30.0),
+        fake_snapshot("claude", "Claude", 72.0),
+    ];
+    let plan = TrayPresentationPlan::resolve(&settings, &snapshots, None);
+    assert_eq!(plan.status_rows[0].snapshot.provider_id, "codex");
+}
+
+#[test]
+fn stacked_bars_style_plans_the_same_windows_as_bars_as_equal_rows() {
+    let snapshots = vec![fake_snapshot_with(
+        "codex",
+        "Codex",
+        30.0,
+        Some(65.0),
+        None,
+        None,
+    )];
+    let bars_settings = Settings {
+        menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::Bars,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    let stacked_settings = Settings {
+        menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::StackedBars,
+        show_as_used: true,
+        ..Settings::default()
+    };
+
+    let TrayIconPlan::Bars {
+        primary_percent,
+        secondary_percent,
+        has_error,
+        provider_tint,
+    } = TrayPresentationPlan::resolve(&bars_settings, &snapshots, None).icon
+    else {
+        panic!("bars style should plan Bars");
+    };
+    let stacked = TrayPresentationPlan::resolve(&stacked_settings, &snapshots, None);
+    assert_eq!(
+        stacked.icon,
+        TrayIconPlan::StackedBars {
+            primary_percent,
+            secondary_percent,
+            has_error,
+            provider_tint,
+        }
+    );
+    assert_eq!(
+        stacked.render_icon(),
+        render_stacked_bars_icon_rgba_with_pace(
+            primary_percent,
+            secondary_percent,
+            has_error,
+            None
+        )
+    );
+    assert_ne!(
+        stacked.render_icon(),
+        TrayPresentationPlan::resolve(&bars_settings, &snapshots, None).render_icon()
+    );
+}
+
+#[test]
+fn stacked_bars_style_with_one_window_draws_the_bars_fallback() {
+    let snapshots = vec![fake_snapshot("codex", "Codex", 30.0)];
+    let bars_settings = Settings {
+        menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::Bars,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    let stacked_settings = Settings {
+        menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::StackedBars,
+        ..bars_settings.clone()
+    };
+    let bars = TrayPresentationPlan::resolve(&bars_settings, &snapshots, None);
+    let stacked = TrayPresentationPlan::resolve(&stacked_settings, &snapshots, None);
+    assert!(matches!(
+        stacked.icon,
+        TrayIconPlan::StackedBars {
+            secondary_percent: None,
+            ..
+        }
+    ));
+    assert_eq!(stacked.render_icon(), bars.render_icon());
+}
+
+#[test]
+fn stacked_bars_style_keeps_the_pace_tint_on_both_rows() {
+    let settings = Settings {
+        menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::StackedBars,
+        ..tint_settings()
+    };
+    let snapshots = vec![paced_snapshot(
+        "synthetic",
+        paced_window(70.0, Some(300), 150),
+    )];
+    let plan = TrayPresentationPlan::resolve_at(&settings, &snapshots, None, pace_now());
+    assert_eq!(plan.icon_pace, Some(TrayPaceColor::Ahead));
+
+    let TrayIconPlan::StackedBars {
+        primary_percent,
+        secondary_percent,
+        has_error,
+        provider_tint: None,
+    } = plan.icon
+    else {
+        panic!("stacked bars style should plan StackedBars");
+    };
     assert_eq!(
         plan.render_icon(),
-        TrayPresentationPlan::resolve(&unpaced_settings, &unpaced, None).render_icon()
+        render_stacked_bars_icon_rgba_with_pace(
+            primary_percent,
+            secondary_percent,
+            has_error,
+            Some(TrayPaceColor::Ahead),
+        )
+    );
+}
+
+const CODEX_BRAND: (u8, u8, u8) = (0x49, 0xA3, 0xB0);
+const CLAUDE_BRAND: (u8, u8, u8) = (0xCC, 0x7C, 0x5E);
+
+fn color_by_provider_settings(style: codexbar::settings::MenuBarIconStyle) -> Settings {
+    Settings {
+        menu_bar_color_by_provider: true,
+        tray_icon_mode: TrayIconMode::Single,
+        menu_bar_icon_style: style,
+        show_as_used: true,
+        ..Settings::default()
+    }
+}
+
+fn pixel_at(rgba: &[u8], x: u32, y: u32) -> [u8; 4] {
+    let index = ((y * codexbar::tray::TRAY_ICON_SIZE + x) * 4) as usize;
+    [
+        rgba[index],
+        rgba[index + 1],
+        rgba[index + 2],
+        rgba[index + 3],
+    ]
+}
+
+#[test]
+fn color_by_provider_defaults_off_and_keeps_usage_colors() {
+    assert!(!Settings::default().menu_bar_color_by_provider);
+    let snapshots = vec![fake_snapshot("codex", "Codex", 30.0)];
+    let plain = Settings {
+        tray_icon_mode: TrayIconMode::Single,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    let plan = TrayPresentationPlan::resolve(&plain, &snapshots, None);
+    assert!(matches!(
+        plan.icon,
+        TrayIconPlan::Bars {
+            provider_tint: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn color_by_provider_tints_single_meter_with_brand_color() {
+    let snapshots = vec![fake_snapshot("codex", "Codex", 30.0)];
+    let settings = color_by_provider_settings(codexbar::settings::MenuBarIconStyle::Bars);
+    let plan = TrayPresentationPlan::resolve(&settings, &snapshots, None);
+    assert!(matches!(
+        plan.icon,
+        TrayIconPlan::Bars {
+            provider_tint: Some(CODEX_BRAND),
+            ..
+        }
+    ));
+    // 30% of the single meter fills x 4..11; x=8 sits in the fill.
+    let (rgba, _, _) = plan.render_icon();
+    assert_eq!(
+        pixel_at(&rgba, 8, 16),
+        [CODEX_BRAND.0, CODEX_BRAND.1, CODEX_BRAND.2, 255]
+    );
+}
+
+#[test]
+fn color_by_provider_tints_percent_icon_text() {
+    let snapshots = vec![fake_snapshot("codex", "Codex", 30.0)];
+    let settings = color_by_provider_settings(codexbar::settings::MenuBarIconStyle::Percent);
+    let plan = TrayPresentationPlan::resolve(&settings, &snapshots, None);
+    assert!(matches!(
+        plan.icon,
+        TrayIconPlan::Percent {
+            provider_tint: Some(CODEX_BRAND),
+            ..
+        }
+    ));
+    let (rgba, _, _) = plan.render_icon();
+    let tinted = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[..3] == [CODEX_BRAND.0, CODEX_BRAND.1, CODEX_BRAND.2])
+        .count();
+    assert!(tinted > 0, "percent glyphs should use the brand color");
+}
+
+#[test]
+fn color_by_provider_uses_the_effective_accent_override() {
+    let snapshots = vec![fake_snapshot("codex", "Codex", 30.0)];
+    let mut settings = color_by_provider_settings(codexbar::settings::MenuBarIconStyle::Bars);
+    settings.set_accent_color(ProviderId::Codex, Some("#FF0000"));
+    let plan = TrayPresentationPlan::resolve(&settings, &snapshots, None);
+    assert!(matches!(
+        plan.icon,
+        TrayIconPlan::Bars {
+            provider_tint: Some((255, 0, 0)),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn color_by_provider_malformed_override_gives_no_tint() {
+    let snapshots = vec![fake_snapshot("codex", "Codex", 30.0)];
+    let mut settings = color_by_provider_settings(codexbar::settings::MenuBarIconStyle::Bars);
+    settings.set_accent_color(ProviderId::Codex, Some("not-a-color"));
+    let plan = TrayPresentationPlan::resolve(&settings, &snapshots, None);
+    assert!(matches!(
+        plan.icon,
+        TrayIconPlan::Bars {
+            provider_tint: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn color_by_provider_colors_each_stacked_row_by_its_provider() {
+    let snapshots = vec![
+        fake_snapshot("codex", "Codex", 30.0),
+        fake_snapshot("claude", "Claude", 72.0),
+    ];
+    let settings = Settings {
+        menu_bar_color_by_provider: true,
+        tray_icon_mode: TrayIconMode::Stacked,
+        stacked_tray_top_provider: Some("codex".to_string()),
+        stacked_tray_bottom_provider: Some("claude".to_string()),
+        show_as_used: true,
+        ..Settings::default()
+    };
+    let plan = TrayPresentationPlan::resolve(&settings, &snapshots, None);
+    assert!(matches!(
+        plan.icon,
+        TrayIconPlan::Stacked {
+            top_tint: Some(CODEX_BRAND),
+            bottom_tint: Some(CLAUDE_BRAND),
+            ..
+        }
+    ));
+    let (rgba, width, _) = plan.render_icon();
+    let pixel = |x: u32, y: u32| {
+        let index = ((y * width + x) * 4) as usize;
+        [
+            rgba[index],
+            rgba[index + 1],
+            rgba[index + 2],
+            rgba[index + 3],
+        ]
+    };
+    // Top row covers y 6..14, bottom row y 18..26 of the stacked icon.
+    assert_eq!(
+        pixel(8, 8),
+        [CODEX_BRAND.0, CODEX_BRAND.1, CODEX_BRAND.2, 255]
+    );
+    assert_eq!(
+        pixel(8, 20),
+        [CLAUDE_BRAND.0, CLAUDE_BRAND.1, CLAUDE_BRAND.2, 255]
+    );
+}
+
+#[test]
+fn parse_hex_rgb_accepts_only_six_digit_hex() {
+    assert_eq!(parse_hex_rgb("#49A3B0"), Some(CODEX_BRAND));
+    assert_eq!(parse_hex_rgb("49a3b0"), Some(CODEX_BRAND));
+    assert_eq!(parse_hex_rgb(" #FF5733 "), Some((255, 87, 51)));
+    assert_eq!(parse_hex_rgb("#49A3"), None);
+    assert_eq!(parse_hex_rgb("#GG0000"), None);
+    assert_eq!(parse_hex_rgb(""), None);
+}
+
+#[test]
+fn color_by_provider_tints_both_stacked_bars_rows() {
+    let snapshots = vec![fake_snapshot_with(
+        "codex",
+        "Codex",
+        30.0,
+        Some(65.0),
+        None,
+        None,
+    )];
+    let settings = color_by_provider_settings(codexbar::settings::MenuBarIconStyle::StackedBars);
+    let plan = TrayPresentationPlan::resolve(&settings, &snapshots, None);
+    assert!(matches!(
+        plan.icon,
+        TrayIconPlan::StackedBars {
+            provider_tint: Some(CODEX_BRAND),
+            ..
+        }
+    ));
+    let (rgba, _, _) = plan.render_icon();
+    assert_eq!(
+        pixel_at(&rgba, 8, 8),
+        [CODEX_BRAND.0, CODEX_BRAND.1, CODEX_BRAND.2, 255]
+    );
+    assert_eq!(
+        pixel_at(&rgba, 8, 20),
+        [CODEX_BRAND.0, CODEX_BRAND.1, CODEX_BRAND.2, 255]
+    );
+}
+
+#[test]
+fn pick_tray_provider_highest_picks_max_primary() {
+    let a = fake_snapshot("codex", "Codex", 30.0);
+    let b = fake_snapshot("claude", "Claude", 72.5);
+    let c = fake_snapshot("gemini", "Gemini", 50.0);
+    let refs: Vec<&ProviderUsageSnapshot> = vec![&a, &b, &c];
+    let picked = pick_tray_provider(
+        &refs,
+        /* prefer_highest = */ true,
+        &Settings::default(),
+        Utc::now(),
+    )
+    .expect("highest mode should pick a provider");
+    assert_eq!(picked.provider_id, "claude");
+}
+
+#[test]
+fn pick_tray_provider_first_preserves_catalog_order() {
+    let a = fake_snapshot("codex", "Codex", 30.0);
+    let b = fake_snapshot("claude", "Claude", 72.5);
+    let refs: Vec<&ProviderUsageSnapshot> = vec![&a, &b];
+    let picked = pick_tray_provider(
+        &refs,
+        /* prefer_highest = */ false,
+        &Settings::default(),
+        Utc::now(),
+    )
+    .expect("non-highest mode should still pick the first entry");
+    assert_eq!(picked.provider_id, "codex");
+}
+
+#[test]
+fn pick_tray_provider_none_when_empty() {
+    let refs: Vec<&ProviderUsageSnapshot> = vec![];
+    let settings = Settings::default();
+    assert!(pick_tray_provider(&refs, true, &settings, Utc::now()).is_none());
+    assert!(pick_tray_provider(&refs, false, &settings, Utc::now()).is_none());
+}
+
+#[test]
+fn pick_tray_provider_highest_ranks_the_selected_metric_by_depletion() {
+    use chrono::TimeZone;
+    let now = Utc.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+    let timed = |used: f64, minutes: u32, remaining_minutes: i64| RateWindowSnapshot {
+        used_percent: used,
+        remaining_percent: 100.0 - used,
+        window_minutes: Some(minutes),
+        resets_at: Some((now + chrono::Duration::minutes(remaining_minutes)).to_rfc3339()),
+        ..Default::default()
+    };
+    // Codex: a 10% session beside a weekly at 60% one hour into a five-hour
+    // window, which runs out in 40 minutes.
+    let mut codex = fake_snapshot("codex", "Codex", 10.0);
+    codex.primary = timed(10.0, 300, 240);
+    codex.secondary = Some(timed(60.0, 300, 240));
+    let claude = fake_snapshot("claude", "Claude", 80.0);
+    let refs: Vec<&ProviderUsageSnapshot> = vec![&claude, &codex];
+
+    let picked = pick_tray_provider(&refs, true, &Settings::default(), now)
+        .expect("highest mode should pick a provider");
+    assert_eq!(picked.provider_id, "codex");
+}
+
+#[test]
+fn estimated_quota_draws_a_tilde_percent_icon_and_status_label() {
+    let settings = Settings {
+        tray_icon_mode: TrayIconMode::Single,
+        menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::Percent,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    let mut estimated = fake_snapshot("opencodego", "OpenCode Go", 42.0);
+    estimated.quota_estimated = true;
+    let snapshots = vec![estimated];
+
+    let plan = TrayPresentationPlan::resolve(&settings, &snapshots, None);
+
+    assert_eq!(
+        plan.icon,
+        TrayIconPlan::Percent {
+            percent: 42.0,
+            has_error: false,
+            provider_tint: None,
+            estimated: true,
+        }
+    );
+    let (rgba, _, _) = plan.render_icon();
+    assert_eq!(
+        rgba,
+        codexbar::tray::render_estimated_percent_icon_rgba_tinted(42.0, false, None, None).0
+    );
+    assert_ne!(
+        rgba,
+        codexbar::tray::render_percent_icon_rgba(42.0, false).0
+    );
+    assert_eq!(
+        plan.status_labels(Language::English),
+        vec![(
+            "status_summary".to_string(),
+            "OpenCode Go ~42% used".to_string()
+        )]
+    );
+}
+
+#[test]
+fn estimated_marker_skips_an_informational_headline() {
+    let mut snapshot = fake_snapshot("opencodego", "OpenCode Go", 0.0);
+    snapshot.quota_estimated = true;
+    snapshot.primary.is_informational = true;
+    snapshot.primary.reset_description = Some("No usage yet".to_string());
+
+    assert_eq!(
+        headline_status_label(&snapshot, true, Language::English),
+        "No usage yet"
+    );
+}
+
+fn openai_api_throughput(latest: Option<u64>) -> crate::commands::ProviderThroughputSnapshot {
+    crate::commands::ProviderThroughputSnapshot {
+        minutes: Vec::new(),
+        frontier: latest.map(|_| 1_700_000_000),
+        latest_tokens_per_minute: latest,
+        peak_tokens_per_minute: latest.unwrap_or(0),
+        peak_at: None,
+        five_minute_average_tokens_per_minute: 0.0,
+        models: Vec::new(),
+        window_minutes: 60,
+        fetched_at: 1_700_000_060,
+        project_id: None,
+    }
+}
+
+#[test]
+fn tokens_per_minute_metric_labels_status_with_the_latest_rate() {
+    let mut settings = Settings {
+        tray_icon_mode: TrayIconMode::PerProvider,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    settings.set_provider_metric(ProviderId::OpenAIApi, MetricPreference::TokensPerMinute);
+    let mut openai = fake_snapshot("openaiapi", "OpenAI API", 40.0);
+    openai.throughput = Some(openai_api_throughput(Some(49_000_000)));
+    let snapshots = vec![openai.clone(), fake_snapshot("codex", "Codex", 30.0)];
+
+    let plan = TrayPresentationPlan::resolve(&settings, &snapshots, None);
+    let labels = plan.status_labels(Language::English);
+
+    assert!(
+        labels.contains(&("openaiapi".to_string(), "OpenAI API 49M/min".to_string())),
+        "{labels:?}"
+    );
+    // Other providers keep their usage label; the meter keeps a usage lane.
+    assert!(
+        labels.contains(&("codex".to_string(), "Codex 30% used".to_string())),
+        "{labels:?}"
+    );
+
+    openai.throughput = Some(openai_api_throughput(Some(0)));
+    assert_eq!(
+        tokens_per_minute_status(&openai, &settings, Language::English).as_deref(),
+        Some("0/min")
+    );
+}
+
+fn nous_balance_detail(id: &str, value: &str) -> crate::commands::ProviderDisplayDetailSnapshot {
+    crate::commands::ProviderDisplayDetailSnapshot {
+        id: id.to_string(),
+        section_title: None,
+        title: id.to_string(),
+        value: value.to_string(),
+        secondary_value: None,
+        progress: None,
+    }
+}
+
+#[test]
+fn balance_only_nous_status_row_reads_its_balance() {
+    let settings = Settings {
+        tray_icon_mode: TrayIconMode::PerProvider,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    // Credits-only account: no monthly meter, so the headline is informational.
+    let mut nous = fake_snapshot("nous", "Nous Portal", 0.0);
+    nous.primary.is_informational = true;
+    nous.primary.reset_description = Some("Nous Portal credits".to_string());
+    nous.display_details = vec![nous_balance_detail("top-up-credits", "$6.76")];
+    // A monthly meter keeps its percentage even when a balance row exists.
+    let mut metered = fake_snapshot("nous", "Nous Portal", 25.0);
+    metered.display_details = vec![nous_balance_detail("total-usable", "$74.25")];
+
+    let balance_only = vec![nous];
+    let plan = TrayPresentationPlan::resolve(&settings, &balance_only, None);
+    assert_eq!(
+        plan.status_labels(Language::English),
+        vec![("nous".to_string(), "Nous Portal $6.76".to_string())]
+    );
+
+    let metered = vec![metered];
+    let plan = TrayPresentationPlan::resolve(&settings, &metered, None);
+    assert_eq!(
+        plan.status_labels(Language::English),
+        vec![("nous".to_string(), "Nous Portal 25% used".to_string())]
+    );
+}
+
+#[test]
+fn tokens_per_minute_metric_without_reported_minutes_is_unavailable() {
+    let mut settings = Settings::default();
+    settings.set_provider_metric(ProviderId::OpenAIApi, MetricPreference::TokensPerMinute);
+    let mut openai = fake_snapshot("openaiapi", "OpenAI API", 40.0);
+
+    assert_eq!(
+        tokens_per_minute_status(&openai, &settings, Language::English).as_deref(),
+        Some("Tokens/min unavailable")
+    );
+    openai.throughput = Some(openai_api_throughput(None));
+    assert_eq!(
+        tokens_per_minute_status(&openai, &settings, Language::English).as_deref(),
+        Some("Tokens/min unavailable")
+    );
+
+    // Any other metric leaves the usage label alone.
+    let automatic = Settings::default();
+    openai.throughput = Some(openai_api_throughput(Some(1_500)));
+    assert_eq!(
+        tokens_per_minute_status(&openai, &automatic, Language::English),
+        None
+    );
+}
+
+#[test]
+fn tokens_per_minute_metric_on_a_provider_without_a_rate_falls_back() {
+    // A saved Tokens/min value must not leak onto a provider that cannot
+    // report a rate: the row keeps the Automatic usage label instead.
+    let mut settings = Settings::default();
+    settings.set_provider_metric(ProviderId::Codex, MetricPreference::TokensPerMinute);
+    let mut codex = fake_snapshot("codex", "Codex", 30.0);
+    codex.throughput = Some(openai_api_throughput(Some(12_000)));
+    assert_eq!(
+        tokens_per_minute_status(&codex, &settings, Language::English),
+        None
+    );
+}
+
+#[test]
+fn tokens_per_minute_metric_keeps_the_automatic_icon_lane() {
+    let mut settings = Settings {
+        tray_icon_mode: TrayIconMode::Single,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    let mut openai = fake_snapshot("openaiapi", "OpenAI API", 40.0);
+    openai.throughput = Some(openai_api_throughput(Some(12_000)));
+    let snapshots = vec![openai];
+    let automatic_icon = TrayPresentationPlan::resolve(&settings, &snapshots, None).icon;
+
+    settings.set_provider_metric(ProviderId::OpenAIApi, MetricPreference::TokensPerMinute);
+    let plan = TrayPresentationPlan::resolve(&settings, &snapshots, None);
+
+    assert_eq!(plan.icon, automatic_icon);
+    assert_eq!(
+        plan.status_labels(Language::English),
+        vec![(
+            "status_summary".to_string(),
+            "OpenAI API 12K/min".to_string()
+        )]
+    );
+}
+
+fn grok_bot_cursor(used_percent: Option<f64>) -> ProviderUsageSnapshot {
+    let mut cursor = fake_snapshot("cursor", "Cursor", 30.0);
+    cursor.extra_rate_windows = used_percent
+        .map(|used| crate::commands::NamedRateWindowSnapshot {
+            id: "cursor-grok-bot".to_string(),
+            title: "Grok Bot".to_string(),
+            window: RateWindowSnapshot {
+                used_percent: used,
+                remaining_percent: 100.0 - used,
+                ..Default::default()
+            },
+            fallback_lane: false,
+            icon_fallback: None,
+        })
+        .into_iter()
+        .collect();
+    cursor
+}
+
+#[test]
+fn named_extra_metric_labels_status_and_meter_with_the_allowance() {
+    let mut settings = Settings {
+        tray_icon_mode: TrayIconMode::PerProvider,
+        show_as_used: true,
+        ..Settings::default()
+    };
+    settings.set_provider_metric(
+        ProviderId::Cursor,
+        MetricPreference::NamedExtra("cursor-grok-bot".to_string()),
+    );
+    let snapshots = vec![
+        grok_bot_cursor(Some(42.0)),
+        fake_snapshot("codex", "Codex", 30.0),
+    ];
+
+    let labels =
+        TrayPresentationPlan::resolve(&settings, &snapshots, None).status_labels(Language::English);
+    assert!(
+        labels.contains(&("cursor".to_string(), "Cursor Grok Bot 42% used".to_string())),
+        "{labels:?}"
+    );
+    assert!(
+        labels.contains(&("codex".to_string(), "Codex 30% used".to_string())),
+        "{labels:?}"
+    );
+    assert_eq!(selected_tray_percents(&snapshots[0], &settings).0, 42.0);
+
+    // A real 0% stays 0%, distinct from an unknown reading.
+    let zero = grok_bot_cursor(Some(0.0));
+    let preference = settings.get_provider_metric(ProviderId::Cursor);
+    assert_eq!(
+        named_extra_status(&zero, &preference, true, Language::English).as_deref(),
+        Some("Grok Bot 0% used")
+    );
+}
+
+#[test]
+fn named_extra_metric_without_a_reading_shows_a_labeled_dash() {
+    let mut settings = Settings {
+        show_as_used: true,
+        ..Settings::default()
+    };
+    let preference = MetricPreference::NamedExtra("cursor-grok-bot".to_string());
+    settings.set_provider_metric(ProviderId::Cursor, preference.clone());
+    let missing = grok_bot_cursor(None);
+
+    assert_eq!(
+        named_extra_status(&missing, &preference, true, Language::English).as_deref(),
+        Some("Grok Bot \u{2013}")
+    );
+    // The meter is unknown instead of borrowing the 30% core lane.
+    assert!(selected_tray_percents(&missing, &settings).0.is_nan());
+}
+
+#[test]
+fn saved_grok_bot_shows_the_promoted_weekly_pool_in_the_tray() {
+    let mut settings = Settings {
+        show_as_used: true,
+        ..Settings::default()
+    };
+    let preference = MetricPreference::NamedExtra("cursor-grok-bot".to_string());
+    settings.set_provider_metric(ProviderId::Cursor, preference.clone());
+    let mut weekly = grok_bot_cursor(None);
+    weekly.primary.used_percent = 10.0;
+    weekly.primary.is_informational = false;
+    weekly.secondary = None;
+    weekly.primary_label = Some("Weekly".to_string());
+
+    assert_eq!(
+        named_extra_status(&weekly, &preference, true, Language::English).as_deref(),
+        Some("Grok Bot 10% used")
+    );
+    assert_eq!(selected_tray_percents(&weekly, &settings).0, 10.0);
+}
+
+#[test]
+fn named_extra_metric_without_a_reading_renders_an_unknown_icon_in_both_directions() {
+    for show_as_used in [true, false] {
+        let mut settings = Settings {
+            show_as_used,
+            menu_bar_icon_style: codexbar::settings::MenuBarIconStyle::Percent,
+            ..Settings::default()
+        };
+        settings.set_provider_metric(
+            ProviderId::Cursor,
+            MetricPreference::NamedExtra("cursor-grok-bot".to_string()),
+        );
+        let snapshots = vec![grok_bot_cursor(None)];
+
+        let (percent_icon, _, _) =
+            TrayPresentationPlan::resolve(&settings, &snapshots, None).render_icon();
+        let unknown =
+            codexbar::tray::render_percent_icon_rgba(codexbar::tray::UNKNOWN_PERCENT, false).0;
+        assert_eq!(percent_icon, unknown, "show_as_used={show_as_used}");
+        assert_ne!(
+            percent_icon,
+            codexbar::tray::render_percent_icon_rgba(0.0, false).0,
+            "show_as_used={show_as_used}"
+        );
+
+        settings.menu_bar_icon_style = codexbar::settings::MenuBarIconStyle::Bars;
+        let (bar_icon, _, _) =
+            TrayPresentationPlan::resolve(&settings, &snapshots, None).render_icon();
+        let (selected, companion) = selected_tray_percents(&snapshots[0], &settings);
+        assert!(selected.is_nan(), "show_as_used={show_as_used}");
+        assert_eq!(
+            bar_icon,
+            codexbar::tray::render_bar_icon_rgba(codexbar::tray::UNKNOWN_PERCENT, companion, false)
+                .0,
+            "show_as_used={show_as_used}"
+        );
+
+        // A real 0% used still renders as a reading in both directions.
+        let zero = vec![grok_bot_cursor(Some(0.0))];
+        settings.menu_bar_icon_style = codexbar::settings::MenuBarIconStyle::Percent;
+        let (zero_icon, _, _) = TrayPresentationPlan::resolve(&settings, &zero, None).render_icon();
+        let expected = if show_as_used { 0.0 } else { 100.0 };
+        assert_eq!(
+            zero_icon,
+            codexbar::tray::render_percent_icon_rgba(expected, false).0,
+            "show_as_used={show_as_used}"
+        );
+    }
+}
+
+#[test]
+fn named_extra_metric_marks_an_estimated_reading_but_not_a_dash() {
+    let preference = MetricPreference::NamedExtra("cursor-grok-bot".to_string());
+    let mut estimated = grok_bot_cursor(Some(42.0));
+    estimated.quota_estimated = true;
+    assert_eq!(
+        named_extra_status(&estimated, &preference, true, Language::English).as_deref(),
+        Some("Grok Bot ~42% used")
+    );
+
+    let mut missing = grok_bot_cursor(None);
+    missing.quota_estimated = true;
+    assert_eq!(
+        named_extra_status(&missing, &preference, true, Language::English).as_deref(),
+        Some("Grok Bot \u{2013}")
+    );
+}
+
+#[test]
+fn named_extra_metric_never_labels_another_provider_or_an_unknown_id() {
+    let grok = MetricPreference::NamedExtra("cursor-grok-bot".to_string());
+    let mut codex = grok_bot_cursor(Some(42.0));
+    codex.provider_id = "codex".to_string();
+    assert_eq!(
+        named_extra_status(&codex, &grok, true, Language::English),
+        None
+    );
+
+    let retired = MetricPreference::NamedExtra("cursor-retired-window".to_string());
+    assert_eq!(
+        named_extra_status(
+            &grok_bot_cursor(Some(42.0)),
+            &retired,
+            true,
+            Language::English
+        ),
+        None
+    );
+    assert_eq!(
+        named_extra_status(
+            &grok_bot_cursor(Some(42.0)),
+            &MetricPreference::Automatic,
+            true,
+            Language::English
+        ),
+        None
     );
 }

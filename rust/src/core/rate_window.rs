@@ -99,11 +99,34 @@ pub struct RateWindow {
     #[serde(default, skip_serializing)]
     pub description_is_detail: bool,
 
+    /// The card counts down to the next quota regeneration ("Regenerates in
+    /// 45m", upstream `syntheticRegenDetail`) instead of a reset.
+    /// Provider-owned; kept out of serialized output so CLI JSON is unchanged.
+    #[serde(default, skip_serializing)]
+    pub reset_regenerates: bool,
+
+    /// Not drawn as a card row: the window only carries a value for the tray
+    /// and float bar, and the card shows that value elsewhere (a provider whose
+    /// upstream snapshot has no window). Provider-owned; not serialized.
+    #[serde(default, skip_serializing)]
+    pub hidden_on_card: bool,
+
     /// Whether the provider explicitly supplied the usage percentage.
     /// Internal-only metadata prevents a missing value normalized to zero from
     /// becoming an exported quota measurement.
     #[serde(default = "rate_window_usage_known_default", skip_serializing)]
     pub(crate) usage_known: bool,
+
+    /// Absolute allowance reported alongside the percentage (for example 250
+    /// credits). Upstream `RateWindow.quotaLimit`; absent for percent-only
+    /// windows, and kept out of payloads unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_limit: Option<f64>,
+
+    /// Unit of [`Self::quota_limit`]: `credits`, `requests`, or an ISO currency
+    /// code. Upstream `RateWindow.quotaUnit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_unit: Option<String>,
 }
 
 fn rate_window_usage_known_default() -> bool {
@@ -120,7 +143,11 @@ impl RateWindow {
             reset_description: None,
             is_informational: false,
             description_is_detail: false,
+            reset_regenerates: false,
+            hidden_on_card: false,
             usage_known: true,
+            quota_limit: None,
+            quota_unit: None,
         }
     }
 
@@ -161,13 +188,36 @@ impl RateWindow {
             reset_description,
             is_informational: false,
             description_is_detail: false,
+            reset_regenerates: false,
+            hidden_on_card: false,
             usage_known: true,
+            quota_limit: None,
+            quota_unit: None,
         }
     }
 
     /// Mark `reset_description` as a detail line instead of reset wording.
     pub fn with_description_as_detail(mut self) -> Self {
         self.description_is_detail = true;
+        self
+    }
+
+    /// Record the absolute allowance behind the percentage, in `unit`.
+    pub fn with_quota(mut self, limit: f64, unit: impl Into<String>) -> Self {
+        self.quota_limit = Some(limit);
+        self.quota_unit = Some(unit.into());
+        self
+    }
+
+    /// The reset is the next quota regeneration ("Regenerates in ...").
+    pub fn with_regenerating_reset(mut self) -> Self {
+        self.reset_regenerates = true;
+        self
+    }
+
+    /// Keep the window for the tray and float bar but off the card.
+    pub fn hidden_on_card(mut self) -> Self {
+        self.hidden_on_card = true;
         self
     }
 
@@ -217,11 +267,6 @@ impl RateWindow {
         self.used_percent >= 100.0
     }
 
-    /// Check if the window is nearly exhausted (>= 90% used)
-    pub fn is_nearly_exhausted(&self) -> bool {
-        self.used_percent >= 90.0
-    }
-
     /// Format the reset time as a countdown string
     pub fn format_countdown(&self) -> Option<String> {
         Some(format_countdown_until(self.resets_at?, Utc::now()))
@@ -243,11 +288,9 @@ fn subtract_one_calendar_month(dt: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
     let max_day = days_in_month(py, pm);
     let day = dt.day().min(max_day);
-    dt.date_naive()
-        .with_year(py)?
-        .with_month(pm)?
-        .with_day(day)
-        .map(|d| d.and_time(dt.time()).and_utc())
+    // Build the date in one step: chaining `with_month` on the 29th-31st fails
+    // when the previous month is shorter (Mar 31 -> Feb 31).
+    chrono::NaiveDate::from_ymd_opt(py, pm, day).map(|d| d.and_time(dt.time()).and_utc())
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
@@ -318,6 +361,27 @@ mod tests {
     }
 
     #[test]
+    fn quota_allowance_serializes_only_when_reported() {
+        let plain = RateWindow::with_details(10.0, Some(43_200), None, None);
+        let plain_json = serde_json::to_value(&plain).expect("rate window JSON");
+        assert!(plain_json.get("quota_limit").is_none());
+        assert!(plain_json.get("quota_unit").is_none());
+
+        let quoted = plain.with_quota(250.0, "credits");
+        let json = serde_json::to_value(&quoted).expect("rate window JSON");
+        assert_eq!(json["quota_limit"], serde_json::json!(250.0));
+        assert_eq!(json["quota_unit"], serde_json::json!("credits"));
+
+        let restored: RateWindow = serde_json::from_value(json).expect("round trip");
+        assert_eq!(restored.quota_limit, Some(250.0));
+        assert_eq!(restored.quota_unit.as_deref(), Some("credits"));
+        let legacy: RateWindow =
+            serde_json::from_value(serde_json::json!({ "used_percent": 5.0 })).expect("legacy");
+        assert_eq!(legacy.quota_limit, None);
+        assert_eq!(legacy.quota_unit, None);
+    }
+
+    #[test]
     fn internal_usage_known_metadata_is_not_serialized() {
         let window = RateWindow::with_details(0.0, Some(300), None, None).with_usage_known(false);
         let json = serde_json::to_value(window).expect("rate window JSON");
@@ -374,6 +438,28 @@ mod tests {
             Some(31 * 24 * 60)
         );
         assert_eq!(RateWindow::monthly_window_minutes(None), None);
+    }
+
+    #[test]
+    fn calendar_month_window_clamps_the_day_into_a_shorter_month() {
+        // Mar 31 minus one month is Feb 28 (Foundation clamps the day): 31 days.
+        let resets = Utc.with_ymd_and_hms(2026, 3, 31, 0, 0, 0).unwrap();
+        assert_eq!(
+            RateWindow::calendar_month_window_minutes(resets),
+            Some(44_640)
+        );
+        // May 31 minus one month is Apr 30: 31 days.
+        let resets = Utc.with_ymd_and_hms(2026, 5, 31, 12, 0, 0).unwrap();
+        assert_eq!(
+            RateWindow::calendar_month_window_minutes(resets),
+            Some(44_640)
+        );
+        // Mar 30 2028 minus one month is Feb 29 (leap year): 30 days.
+        let resets = Utc.with_ymd_and_hms(2028, 3, 30, 0, 0, 0).unwrap();
+        assert_eq!(
+            RateWindow::calendar_month_window_minutes(resets),
+            Some(43_200)
+        );
     }
 
     #[test]

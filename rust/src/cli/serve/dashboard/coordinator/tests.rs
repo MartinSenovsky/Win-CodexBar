@@ -24,6 +24,7 @@ fn stub_input() -> SnapshotInput {
             }],
             costs: HashMap::new(),
             claude_accounts: None,
+            provider_accounts: std::collections::HashMap::new(),
             generated_at: chrono::Utc::now(),
             refresh_seconds: 60,
             order: vec![],
@@ -32,6 +33,8 @@ fn stub_input() -> SnapshotInput {
         identity: DashboardIdentity::Redacted,
         version: None,
         usage_bars_show_used: None,
+        weekly_work_days: None,
+        all_accounts: false,
     }
 }
 

@@ -20,8 +20,11 @@ use super::types::{CodexLocalProjectUsageSnapshot, SessionUsage, untitled_sessio
 const SESSION_INDEX_MAX_LINE_BYTES: u64 = 64 * 1024;
 /// Only the head of `config.toml` is read when looking for `sqlite_home`.
 const CONFIG_PREFIX_BYTES: u64 = 256 * 1024;
-const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+pub(super) const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 const DEFAULT_STATE_DATABASE: &str = "state_5.sqlite";
+/// Fallback titles from the state database are capped at this many characters.
+/// Names from `session_index.jsonl` are not capped.
+const DATABASE_TITLE_MAX_CHARS: usize = 256;
 const PROJECT_TOP_SESSION_LIMIT: usize = 5;
 
 /// A session whose thread name is wanted: its id and original working directory.
@@ -219,7 +222,7 @@ fn skip_to_line_end<R: BufRead>(reader: &mut R) -> bool {
 }
 
 /// Directory holding `state_<n>.sqlite` for one session.
-fn sqlite_home(
+pub(super) fn sqlite_home(
     codex_home: &Path,
     configured_home: Option<&Path>,
     env_sqlite_home: Option<&str>,
@@ -245,7 +248,7 @@ fn sqlite_home(
 /// Only the user config is read: project, managed and profile layers are not
 /// persisted with the rollout and an untrusted checkout must not redirect the
 /// lookup. Only the first 256 KiB is read.
-fn configured_sqlite_home(codex_home: &Path) -> Option<PathBuf> {
+pub(super) fn configured_sqlite_home(codex_home: &Path) -> Option<PathBuf> {
     let file = File::open(codex_home.join("config.toml")).ok()?;
     let mut bytes = Vec::new();
     file.take(CONFIG_PREFIX_BYTES)
@@ -279,7 +282,7 @@ fn top_level_sqlite_home(contents: &str) -> Option<String> {
 }
 
 /// Highest `state_<n>.sqlite` in `dir`, else the default `state_5.sqlite` path.
-fn newest_state_database(dir: &Path) -> PathBuf {
+pub(super) fn newest_state_database(dir: &Path) -> PathBuf {
     let newest = fs::read_dir(dir).ok().and_then(|entries| {
         entries
             .flatten()
@@ -301,7 +304,8 @@ fn newest_state_database(dir: &Path) -> PathBuf {
     newest.unwrap_or_else(|| dir.join(DEFAULT_STATE_DATABASE))
 }
 
-/// `SELECT title FROM threads WHERE id = ?1 LIMIT 1` for each id, read-only.
+/// `threads.title` for each id, read-only, bounded to
+/// [`DATABASE_TITLE_MAX_CHARS`] characters.
 fn database_titles(database: &Path, ids: &[&str]) -> Vec<(String, String)> {
     if !database.is_file() {
         return Vec::new();
@@ -315,7 +319,14 @@ fn database_titles(database: &Path, ids: &[&str]) -> Vec<(String, String)> {
     if conn.busy_timeout(BUSY_TIMEOUT).is_err() {
         return Vec::new();
     }
-    let Ok(mut statement) = conn.prepare("SELECT title FROM threads WHERE id = ?1 LIMIT 1") else {
+    // Codex copies the whole first prompt into `threads.title`. SQLite still reads
+    // the full value, but truncating in SQL keeps the copy handed to Rust (and
+    // every label built from it) bounded. SQLite counts Unicode code points for
+    // TEXT, so `substr` never splits a character.
+    let query = format!(
+        "SELECT substr(title, 1, {DATABASE_TITLE_MAX_CHARS}) FROM threads WHERE id = ?1 LIMIT 1"
+    );
+    let Ok(mut statement) = conn.prepare(&query) else {
         return Vec::new();
     };
     ids.iter()

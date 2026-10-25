@@ -63,6 +63,47 @@ pub fn reorder_providers(
     Ok(build_provider_summaries(&settings))
 }
 
+/// Save a new order for the providers the Settings sidebar lists. Only their
+/// slots change: a provider the sidebar does not list keeps its position.
+fn save_visible_provider_order(
+    app: &tauri::AppHandle,
+    visible: Vec<String>,
+) -> Result<Vec<ProviderSummary>, String> {
+    let mut settings = Settings::load();
+    let full = settings.provider_display_order_names();
+    settings.provider_order = codexbar::settings::merge_visible_provider_order(&full, &visible)
+        .ok_or_else(|| "Provider order names an unknown or repeated provider".to_string())?;
+    settings.save().map_err(|e| e.to_string())?;
+    crate::tray_bridge::refresh_tray_presentation(app);
+    crate::events::emit_settings_changed(app);
+    Ok(build_provider_summaries(&settings))
+}
+
+/// Settings sidebar reorder: `ids` is the full visible order after the move.
+#[tauri::command]
+pub fn reorder_visible_providers(
+    app: tauri::AppHandle,
+    ids: Vec<String>,
+) -> Result<Vec<ProviderSummary>, String> {
+    save_visible_provider_order(&app, ids)
+}
+
+/// Restore the built-in order for the providers the sidebar lists.
+#[tauri::command]
+pub fn restore_default_provider_order(
+    app: tauri::AppHandle,
+) -> Result<Vec<ProviderSummary>, String> {
+    let visible: Vec<String> = {
+        let settings = Settings::load();
+        ProviderId::all()
+            .iter()
+            .filter(|provider| settings.is_provider_listed(**provider))
+            .map(|provider| provider.cli_name().to_string())
+            .collect()
+    };
+    save_visible_provider_order(&app, visible)
+}
+
 // ── Per-provider usage source ─────────────────────────────────────────
 
 pub(crate) fn provider_usage_source_lookup(
@@ -181,6 +222,34 @@ pub fn remove_openrouter_management_api_key() -> Result<(), String> {
     settings.save().map_err(|error| error.to_string())
 }
 
+// ── Vercel personal budget access token ──────────────────────────────
+
+#[tauri::command]
+pub fn has_vercel_access_token() -> bool {
+    Settings::load()
+        .management_api_token(ProviderId::Vercel)
+        .is_some()
+}
+
+#[tauri::command]
+pub fn set_vercel_access_token(access_token: String) -> Result<(), String> {
+    let trimmed = access_token.trim();
+    if trimmed.is_empty() {
+        return Err("Vercel access token must not be empty".to_string());
+    }
+    validate_single_line_secret(trimmed, "Vercel access token", MAX_API_KEY_LEN)?;
+    let mut settings = Settings::load();
+    settings.set_management_api_token(ProviderId::Vercel, Some(trimmed.to_string()));
+    settings.save().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn remove_vercel_access_token() -> Result<(), String> {
+    let mut settings = Settings::load();
+    settings.set_management_api_token(ProviderId::Vercel, None);
+    settings.save().map_err(|error| error.to_string())
+}
+
 // ── Azure OpenAI API version ─────────────────────────────────────────
 
 fn azure_openai_provider(provider_id: &str) -> Result<codexbar::core::ProviderId, String> {
@@ -250,6 +319,16 @@ fn cookie_source_provider(provider_id: &str) -> Option<codexbar::core::ProviderI
         "helmcode" => ProviderId::Helmcode,
         "typesafe" => ProviderId::TypeSafe,
         "hyper" => ProviderId::Hyper,
+        "groq" => ProviderId::Groq,
+        "workbuddy" => ProviderId::WorkBuddy,
+        "museai" => ProviderId::MuseAI,
+        "lithosai" => ProviderId::LithosAI,
+        "langdock" => ProviderId::Langdock,
+        "tinyapi" => ProviderId::TinyApi,
+        "xapi" => ProviderId::Xapi,
+        "parallel" => ProviderId::Parallel,
+        "claudeplatform" => ProviderId::ClaudePlatform,
+        "traecn" => ProviderId::TraeCn,
         _ => return None,
     })
 }
@@ -362,6 +441,10 @@ fn workspace_provider(provider_id: &str) -> Option<codexbar::core::ProviderId> {
         "helmcode" => ProviderId::Helmcode,
         "gitkraken" => ProviderId::GitKraken,
         "muse" => ProviderId::Muse,
+        "exa" => ProviderId::Exa,
+        "cosmic" => ProviderId::Cosmic,
+        "flora" => ProviderId::Flora,
+        "vercel" => ProviderId::Vercel,
         _ => return None,
     })
 }
@@ -452,6 +535,7 @@ mod tests {
             (ProviderId::Wayfinder, "http://localhost:8787"),
             (ProviderId::Bifrost, "https://bifrost.example.com"),
             (ProviderId::Aixy, "https://aixy.example.com/prefix"),
+            (ProviderId::ClawRouter, "https://router.example.com/v1"),
         ] {
             settings.set_gateway_url(id, url);
             let ctx = super::super::providers::build_fetch_context(
@@ -484,12 +568,44 @@ mod tests {
         assert_eq!(gateway_provider("wayfinder"), Some(ProviderId::Wayfinder));
         assert_eq!(gateway_provider("bifrost"), Some(ProviderId::Bifrost));
         assert_eq!(gateway_provider("aixy"), Some(ProviderId::Aixy));
+        assert_eq!(gateway_provider("clawrouter"), Some(ProviderId::ClawRouter));
         assert_eq!(gateway_provider("codex"), None);
     }
 
     #[test]
     fn maps_llmman_workspace_provider() {
         assert_eq!(workspace_provider("llmman"), Some(ProviderId::LLMMan));
+    }
+
+    #[test]
+    fn maps_exa_api_key_id_workspace_provider() {
+        assert_eq!(workspace_provider("exa"), Some(ProviderId::Exa));
+    }
+
+    #[test]
+    fn maps_cosmic_project_provider() {
+        assert_eq!(workspace_provider("cosmic"), Some(ProviderId::Cosmic));
+    }
+
+    #[test]
+    fn maps_flora_workspace_provider() {
+        assert_eq!(workspace_provider("flora"), Some(ProviderId::Flora));
+    }
+
+    #[test]
+    fn maps_vercel_team_provider_and_validates_its_team_id() {
+        let id = workspace_provider("vercel").expect("vercel exposes a team id");
+        assert_eq!(id, ProviderId::Vercel);
+        assert_eq!(
+            codexbar::settings::validate_provider_workspace_value(id, " team_abc123 ").unwrap(),
+            "team_abc123"
+        );
+        assert_eq!(
+            codexbar::settings::validate_provider_workspace_value(id, "my-team").unwrap(),
+            "my-team"
+        );
+        assert!(codexbar::settings::validate_provider_workspace_value(id, "bad team").is_err());
+        assert!(codexbar::settings::validate_provider_workspace_value(id, "../team").is_err());
     }
 
     #[test]
@@ -547,6 +663,7 @@ fn gateway_provider(provider_id: &str) -> Option<codexbar::core::ProviderId> {
         "wayfinder" => Some(codexbar::core::ProviderId::Wayfinder),
         "bifrost" => Some(codexbar::core::ProviderId::Bifrost),
         "aixy" => Some(codexbar::core::ProviderId::Aixy),
+        "clawrouter" => Some(codexbar::core::ProviderId::ClawRouter),
         _ => None,
     }
 }
@@ -574,6 +691,10 @@ pub fn set_provider_gateway_url(provider_id: String, gateway_url: String) -> Res
         }
         codexbar::core::ProviderId::Aixy => {
             codexbar::providers::aixy::validate_gateway_url(gateway_url)
+                .map_err(|error| error.to_string())?;
+        }
+        codexbar::core::ProviderId::ClawRouter => {
+            codexbar::providers::clawrouter::validate_gateway_url(gateway_url)
                 .map_err(|error| error.to_string())?;
         }
         _ => unreachable!("gateway_provider only returns gateway providers"),
@@ -843,6 +964,77 @@ pub fn cookie_source_options_for(provider_id: &str, lang: Language) -> Vec<Cooki
                 Some(locale::LocaleKey::CookieHelpHyperManual),
             ),
             cookie_option(lang, "off", Some(locale::LocaleKey::CookieHelpHyperOff)),
+        ],
+        // Upstream reads the console session from the browser only; manual
+        // keeps a pasted `stytch_session` header for browsers whose cookies
+        // Windows cannot decrypt.
+        "groq" => vec![
+            cookie_option(lang, "auto", None),
+            cookie_option(lang, "manual", None),
+            cookie_option(lang, "off", None),
+        ],
+        // Upstream picks one Edge profile instead; Windows uses the shared
+        // cookie-source choices: automatic browser import, a pasted header, or off.
+        "langdock" => vec![
+            cookie_option(lang, "auto", None),
+            cookie_option(lang, "manual", None),
+            cookie_option(lang, "off", None),
+        ],
+        // Upstream's LithosAI cookie source: automatic browser import,
+        // a pasted header, or off.
+        "lithosai" => vec![
+            cookie_option(lang, "auto", None),
+            cookie_option(lang, "manual", None),
+            cookie_option(lang, "off", None),
+        ],
+        // Upstream's Muse (muse.ai) cookie source: automatic browser import,
+        // a pasted header, or off.
+        "museai" => vec![
+            cookie_option(lang, "auto", None),
+            cookie_option(lang, "manual", None),
+            cookie_option(lang, "off", None),
+        ],
+        // Upstream's WorkBuddy cookie source: automatic browser import,
+        // a pasted header, or off.
+        "workbuddy" => vec![
+            cookie_option(lang, "auto", None),
+            cookie_option(lang, "manual", None),
+            cookie_option(lang, "off", None),
+        ],
+        // Upstream's TinyApi cookie source: automatic browser import,
+        // a pasted header, or off.
+        "tinyapi" => vec![
+            cookie_option(lang, "auto", None),
+            cookie_option(lang, "manual", None),
+            cookie_option(lang, "off", None),
+        ],
+        // X API cookie source: automatic browser import,
+        // a pasted header, or off.
+        "xapi" => vec![
+            cookie_option(lang, "auto", None),
+            cookie_option(lang, "manual", None),
+            cookie_option(lang, "off", None),
+        ],
+        // Upstream's Parallel picker (Chrome only there); this port offers the
+        // shared browser order: automatic browser import, a pasted header, or off.
+        "parallel" => vec![
+            cookie_option(lang, "auto", None),
+            cookie_option(lang, "manual", None),
+            cookie_option(lang, "off", None),
+        ],
+        // Upstream's Claude Platform picker: automatic browser import, a
+        // pasted platform.claude.com header, or off.
+        "claudeplatform" => vec![
+            cookie_option(lang, "auto", None),
+            cookie_option(lang, "manual", None),
+            cookie_option(lang, "off", None),
+        ],
+        // Upstream's Trae CN picker: automatic browser import, a pasted
+        // api.trae.cn Cookie header, or off.
+        "traecn" => vec![
+            cookie_option(lang, "auto", None),
+            cookie_option(lang, "manual", None),
+            cookie_option(lang, "off", None),
         ],
         _ => Vec::new(),
     }

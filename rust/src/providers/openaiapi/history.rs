@@ -17,6 +17,7 @@ use crate::core::{
 const MAX_CARD_ENTRIES: usize = 10_000;
 /// Largest integer a JavaScript number holds exactly; upstream rejects anything above it.
 const MAX_SAFE_COUNT: u64 = 9_007_199_254_740_991;
+const SECONDS_PER_DAY: i64 = 86_400;
 const DEFAULT_LINE_ITEM: &str = "API";
 const DEFAULT_MODEL: &str = "Responses and Chat Completions";
 
@@ -136,26 +137,20 @@ pub(super) fn daily_usage(
         for result in &bucket.results {
             let input = count(result.input_tokens, "input_tokens")?;
             let cached = count(result.input_cached_tokens, "input_cached_tokens")?;
-            let audio_input = count(result.input_audio_tokens, "input_audio_tokens")?;
+            // Audio breakdowns are already inside `input_tokens`/`output_tokens`; they are
+            // validated but never added again (upstream 5a40ac439).
+            count(result.input_audio_tokens, "input_audio_tokens")?;
             let output = count(result.output_tokens, "output_tokens")?;
-            let audio_output = count(result.output_audio_tokens, "output_audio_tokens")?;
+            count(result.output_audio_tokens, "output_audio_tokens")?;
             let requests = count(result.num_model_requests, "num_model_requests")?;
             let model = day
                 .models
                 .entry(display_name(result.model.as_deref(), DEFAULT_MODEL))
                 .or_default();
             model.requests = checked_count_sum(model.requests, requests, "model requests")?;
-            model.input = checked_count_sum(
-                model.input,
-                checked_count_sum(input, audio_input, "input_tokens")?,
-                "model input_tokens",
-            )?;
+            model.input = checked_count_sum(model.input, input, "model input_tokens")?;
             model.cached = checked_count_sum(model.cached, cached, "model cached_input_tokens")?;
-            model.output = checked_count_sum(
-                model.output,
-                checked_count_sum(output, audio_output, "output_tokens")?,
-                "model output_tokens",
-            )?;
+            model.output = checked_count_sum(model.output, output, "model output_tokens")?;
         }
     }
 
@@ -168,6 +163,43 @@ pub(super) fn daily_usage(
     let excess = daily.len().saturating_sub(history_days as usize);
     daily.drain(..excess);
     Ok(daily)
+}
+
+/// Add a zero bucket for every day in `day_starts` that has no bucket yet, then keep
+/// the list ascending. Days match by UTC day, so a bucket that starts mid-day still
+/// counts as its day. An empty `daily` stays empty: the chart keeps its empty state
+/// when the API reported nothing at all, and only a fetch with data proves the
+/// missing days are zero.
+pub(crate) fn fill_missing_days(
+    daily: &mut Vec<OpenAiApiDailyUsage>,
+    day_starts: impl IntoIterator<Item = i64>,
+) {
+    if daily.is_empty() {
+        return;
+    }
+    for start in day_starts {
+        let day = start.div_euclid(SECONDS_PER_DAY);
+        if daily
+            .iter()
+            .any(|existing| existing.start_time.div_euclid(SECONDS_PER_DAY) == day)
+        {
+            continue;
+        }
+        let start_time = day * SECONDS_PER_DAY;
+        daily.push(OpenAiApiDailyUsage {
+            start_time,
+            end_time: start_time + SECONDS_PER_DAY,
+            cost_usd: 0.0,
+            requests: 0,
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            line_items: Vec::new(),
+            models: Vec::new(),
+        });
+    }
+    daily.sort_by_key(|day| day.start_time);
 }
 
 /// The card payload for `daily`, or `None` when it breaks an upstream card bound (a day

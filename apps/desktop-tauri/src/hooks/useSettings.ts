@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import type { SettingsSnapshot, SettingsUpdate } from "../types/bridge";
 import { getSettingsSnapshot, updateSettings } from "../lib/tauri";
+import { useTauriEvent } from "./useTauriEvent";
 
 interface UseSettingsReturn {
   settings: SettingsSnapshot;
@@ -38,6 +38,15 @@ function applyPatch(current: SettingsSnapshot, patch: SettingsUpdate): SettingsS
   // Metric preferences are merged per provider as well.
   if (patch.providerMetrics) {
     next.providerMetrics = { ...current.providerMetrics, ...patch.providerMetrics };
+  }
+  // Quota warnings replace one provider's value at a time; an empty value is Global.
+  if (patch.providerQuotaWarnings) {
+    const warnings = { ...current.providerQuotaWarnings };
+    for (const [id, value] of Object.entries(patch.providerQuotaWarnings)) {
+      if (Object.keys(value).length === 0) delete warnings[id];
+      else warnings[id] = value;
+    }
+    next.providerQuotaWarnings = warnings;
   }
   return next as unknown as SettingsSnapshot;
 }
@@ -79,37 +88,16 @@ export function useSettings(initial: SettingsSnapshot): UseSettingsReturn {
   // React state, so the in-window CustomEvent below never reaches them. Rust
   // broadcasts "settings-changed" after every persisted update; re-fetch the
   // snapshot so this surface (e.g. the tray zoom) re-renders live.
-  useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    // `Promise.resolve` tolerates test mocks that return a bare unlisten fn (or
-    // undefined) instead of a promise; the `active` flag handles unmounting
-    // before the listener finishes registering.
-    Promise.resolve(
-      listen("settings-changed", () => {
-        getSettingsSnapshot()
-          .then((fresh) => {
-            // While a save from this window is pending, its response is the
-            // newer state; an earlier save's broadcast must not undo it.
-            if (pendingSaves.current === 0) setSettings(fresh);
-          })
-          .catch(() => {
-            // Keep the current copy if the refresh fails.
-          });
-      }),
-    )
-      .then((fn) => {
-        if (active) {
-          unlisten = fn;
-        } else {
-          fn?.();
-        }
+  useTauriEvent("settings-changed", () => {
+    getSettingsSnapshot()
+      .then((fresh) => {
+        // While a save from this window is pending, its response is the
+        // newer state; an earlier save's broadcast must not undo it.
+        if (pendingSaves.current === 0) setSettings(fresh);
       })
-      .catch(() => {});
-    return () => {
-      active = false;
-      unlisten?.();
-    };
+      .catch(() => {
+        // Keep the current copy if the refresh fails.
+      });
   }, []);
 
   // `saving` disables every control on the tab, which dims them to 50%

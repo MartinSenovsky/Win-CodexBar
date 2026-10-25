@@ -4,19 +4,10 @@
 //! Uses API token stored in Windows Credential Manager
 
 mod balance;
-pub mod mcp_details;
 pub mod region;
 mod reset_plausibility;
 pub mod settings;
 
-// Re-exports for MCP details menu
-#[allow(
-    unused_imports,
-    reason = "imports needed for future ZAI provider wiring"
-)]
-pub use mcp_details::{
-    McpDetailsMenu, ZaiLimitEntry, ZaiLimitType, ZaiLimitUnit, ZaiUsageDetail, ZaiUsageSnapshot,
-};
 pub use region::ZaiRegion;
 pub use settings::ZaiSettingsError;
 
@@ -27,7 +18,7 @@ use serde::Deserialize;
 
 use crate::core::{
     FetchContext, Provider, ProviderDisplayDetail, ProviderError, ProviderFetchResult, ProviderId,
-    ProviderMetadata, RateWindow, SourceMode, UsageSnapshot,
+    RateWindow, SourceMode, UsageSnapshot,
 };
 
 use reset_plausibility::is_plausible_five_hour_reset;
@@ -194,10 +185,17 @@ fn unavailable_quota_detail(has_token_limits: bool) -> Option<ProviderDisplayDet
     ProviderDisplayDetail::new(id, title, "Unavailable")?.with_secondary_value(ZAI_UNAVAILABLE_HINT)
 }
 
+/// Reset-window pace (upstream `ZaiProviderDescriptor.pace`, v0.70.0): the
+/// monthly MCP window, resolved to the calendar month ending at its reset.
+pub(crate) const PACE_CAPABILITY: crate::core::ProviderPaceCapability =
+    crate::core::ProviderPaceCapability {
+        reset_window_pace: crate::core::PaceWindowRule::Custom(reset_window_pace_matches),
+        inferred_monthly_duration: crate::core::PaceDurationRule::Custom(is_monthly_mcp_window),
+    };
+
 /// z.ai provider
-pub struct ZaiProvider {
-    metadata: ProviderMetadata,
-}
+#[derive(Default)]
+pub struct ZaiProvider;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ZaiTeamContext {
@@ -207,21 +205,7 @@ struct ZaiTeamContext {
 
 impl ZaiProvider {
     pub fn new() -> Self {
-        Self {
-            metadata: ProviderMetadata {
-                id: ProviderId::Zai,
-                display_name: "z.ai",
-                session_label: "Tokens",
-                weekly_label: "MCP",
-                supports_opus: false,
-                supports_credits: true,
-                default_enabled: false,
-                is_primary: false,
-                dashboard_url: Some("https://z.ai/manage-apikey/coding-plan/personal/my-plan"),
-                status_page_url: None,
-                tertiary_label_key: None,
-            },
-        }
+        Self
     }
 
     /// Effective API region (upstream 0.48.0): an explicit settings value
@@ -268,26 +252,11 @@ impl ZaiProvider {
         })
     }
 
-    /// Validate endpoint overrides against the region *before* any bearer
-    /// request (upstream #2621/#2623: canonical cross-region overrides are
-    /// rejected pre-auth; custom relay hosts stay legal).
-    fn validate_endpoint_overrides(
-        env: &settings::EnvMap,
-        region: ZaiRegion,
-    ) -> Result<(), ProviderError> {
-        ZaiSettingsReader::validate_endpoint_overrides(env, region)
-            .map_err(|err| ProviderError::Other(err.to_string()))
-    }
-
     /// Quota URL: `Z_AI_QUOTA_URL` full override → `Z_AI_API_HOST` host
     /// override → the selected region's canonical endpoint.
     fn quota_url(env: &settings::EnvMap, region: ZaiRegion) -> Result<Url, ProviderError> {
         let provider_err = |err: ZaiSettingsError| ProviderError::Other(err.to_string());
-        let env_get = |key: &str| env.get(key).and_then(|raw| settings::cleaned(raw));
-        if env_get(settings::ZAI_QUOTA_URL_ENV).is_some() {
-            let url = ZaiSettingsReader::quota_url_override(env)
-                .map_err(provider_err)?
-                .expect("override present");
+        if let Some(url) = ZaiSettingsReader::quota_url_override(env).map_err(provider_err)? {
             return Ok(url);
         }
         if let Some(url) = ZaiSettingsReader::quota_url_from_api_host(env).map_err(provider_err)? {
@@ -336,8 +305,9 @@ impl ZaiProvider {
         let env = settings::process_env();
         let region = Self::effective_region(ctx, &env);
         // Canonical cross-region overrides are rejected before any bearer
-        // token is sent (upstream #2621/#2623).
-        Self::validate_endpoint_overrides(&env, region)?;
+        // token is sent; custom relay hosts stay legal (upstream #2621/#2623).
+        ZaiSettingsReader::validate_endpoint_overrides(&env, region)
+            .map_err(|err| ProviderError::Other(err.to_string()))?;
         let api_token = Self::get_api_token(ctx.api_key.as_deref(), region, &env)?;
 
         let client = crate::core::credentialed_http_client_builder()
@@ -489,16 +459,18 @@ impl ZaiProvider {
             ((used / limit) * 100.0).clamp(0.0, 100.0)
         }
 
-        // Upstream 0.48.0 `rateWindow`/`resetDescription`: only token-type
-        // windows keep duration minutes; TIME_LIMIT (MCP) carries the "MCP"
-        // label and no window duration; 5-hour token windows are labeled
-        // "5-hour"; otherwise the explicit window label is used.
+        // Upstream zai.js `window` (v0.73.0 :85-99): every limit takes its
+        // length from the unit multipliers; the monthly MCP marker (TIME_LIMIT
+        // unit 5, number 1) gets the 30-day sentinel instead. TIME_LIMIT (MCP)
+        // carries the "MCP" label; 5-hour token windows are labeled "5-hour";
+        // otherwise the explicit window label is used.
         let now = Utc::now();
         let make_window = |l: &ZaiLimit| -> RateWindow {
-            let window_mins = if is_token_limit_type(l.limit_type.as_deref()) {
-                ZaiProvider::window_minutes(l)
+            let is_token_limit = is_token_limit_type(l.limit_type.as_deref());
+            let window_mins = if is_monthly_mcp_marker(l) {
+                Some(crate::core::MONTHLY_WINDOW_SENTINEL_MINUTES)
             } else {
-                None
+                ZaiProvider::window_minutes(l)
             };
             let resets_at = l
                 .next_reset_time
@@ -509,8 +481,11 @@ impl ZaiProvider {
                         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
                         .map(|timestamp| timestamp.with_timezone(&Utc))
                 });
-            let resets_at =
-                resets_at.filter(|reset| is_plausible_five_hour_reset(window_mins, *reset, now));
+            // The five-hour plausibility check is for Coding Plan token
+            // limits only; a five-hour TIME_LIMIT keeps its reset.
+            let resets_at = resets_at.filter(|reset| {
+                !is_token_limit || is_plausible_five_hour_reset(window_mins, *reset, now)
+            });
             RateWindow::with_details(
                 compute_percent(l),
                 window_mins,
@@ -566,16 +541,25 @@ impl ZaiProvider {
     /// Returns `None` when number ≤ 0 or unit is unknown (upstream windowMinutes).
     fn window_minutes(l: &ZaiLimit) -> Option<u32> {
         let number = l.number.filter(|&n| n > 0)? as u32;
-        let unit = l.unit?;
-        let minutes_per_unit = match unit {
-            1 => 1440,  // days
-            3 => 60,    // hours
-            5 => 1,     // minutes
-            6 => 10080, // weeks
-            _ => return None,
-        };
-        Some(number * minutes_per_unit)
+        let (minutes_per_unit, _, _) = unit_spec(l.unit?)?;
+        number.checked_mul(minutes_per_unit)
     }
+}
+
+fn is_monthly_mcp_marker(l: &ZaiLimit) -> bool {
+    is_time_limit_type(l.limit_type.as_deref()) && l.unit == Some(5) && l.number == Some(1)
+}
+
+/// Upstream `ZaiProviderDescriptor.isMonthlyMCPWindow`: the MCP window with
+/// the 30-day sentinel duration. Both its reset-window pace and its inferred
+/// monthly length follow this rule.
+pub(crate) fn is_monthly_mcp_window(window: &RateWindow) -> bool {
+    window.window_minutes == Some(crate::core::MONTHLY_WINDOW_SENTINEL_MINUTES)
+        && window.reset_description.as_deref() == Some("MCP")
+}
+
+pub(crate) fn reset_window_pace_matches(window: &RateWindow, _now: DateTime<Utc>) -> bool {
+    is_monthly_mcp_window(window)
 }
 
 /// Upstream 0.48.0 `resetDescription`: MCP (TIME_LIMIT) → "MCP"; 5-hour
@@ -592,39 +576,20 @@ fn rate_window_reset_description(l: &ZaiLimit, window_mins: Option<u32>) -> Opti
 
 fn window_label(l: &ZaiLimit) -> Option<String> {
     let number = l.number.filter(|&n| n > 0)?;
-    let unit = l.unit?;
-    let unit_label = match unit {
-        1 => {
-            if number == 1 {
-                "day"
-            } else {
-                "days"
-            }
-        }
-        3 => {
-            if number == 1 {
-                "hour"
-            } else {
-                "hours"
-            }
-        }
-        5 => {
-            if number == 1 {
-                "minute"
-            } else {
-                "minutes"
-            }
-        }
-        6 => {
-            if number == 1 {
-                "week"
-            } else {
-                "weeks"
-            }
-        }
-        _ => return None,
-    };
+    let (_, one, many) = unit_spec(l.unit?)?;
+    let unit_label = if number == 1 { one } else { many };
     Some(format!("{number} {unit_label} window"))
+}
+
+/// z.ai limit unit code → (minutes per unit, singular label, plural label).
+fn unit_spec(unit: i32) -> Option<(u32, &'static str, &'static str)> {
+    Some(match unit {
+        1 => (1440, "day", "days"),
+        3 => (60, "hour", "hours"),
+        5 => (1, "minute", "minutes"),
+        6 => (10080, "week", "weeks"),
+        _ => return None,
+    })
 }
 
 impl ZaiTeamContext {
@@ -662,12 +627,6 @@ fn authorization_header(token: &str) -> String {
     }
 }
 
-impl Default for ZaiProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait]
 impl Provider for ZaiProvider {
     fn automatic_metric_prioritizes_exhausted_window(&self) -> bool {
@@ -676,10 +635,6 @@ impl Provider for ZaiProvider {
 
     fn id(&self) -> ProviderId {
         ProviderId::Zai
-    }
-
-    fn metadata(&self) -> &ProviderMetadata {
-        &self.metadata
     }
 
     async fn fetch_usage(&self, ctx: &FetchContext) -> Result<ProviderFetchResult, ProviderError> {
@@ -697,14 +652,6 @@ impl Provider for ZaiProvider {
 
     fn available_sources(&self) -> Vec<SourceMode> {
         vec![SourceMode::Auto, SourceMode::OAuth]
-    }
-
-    fn supports_web(&self) -> bool {
-        false
-    }
-
-    fn supports_cli(&self) -> bool {
-        false
     }
 }
 

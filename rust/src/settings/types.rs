@@ -60,22 +60,171 @@ pub fn normalize_usage_threshold_overrides(
         .collect()
 }
 
-impl Settings {
-    pub fn usage_thresholds(&self, provider: ProviderId, window: &str) -> UsageThresholds {
-        let provider_key = provider.cli_name();
-        let window_key = format!("{provider_key}:{window}");
-        let provider_override = self.provider_usage_thresholds.get(provider_key);
-        let window_override = self.provider_usage_thresholds.get(&window_key);
-        UsageThresholds {
-            high: window_override
-                .and_then(|value| value.high)
-                .or_else(|| provider_override.and_then(|value| value.high))
-                .unwrap_or(self.high_usage_threshold),
-            critical: window_override
-                .and_then(|value| value.critical)
-                .or_else(|| provider_override.and_then(|value| value.critical))
-                .unwrap_or(self.critical_usage_threshold),
+/// The two quota windows that carry per-provider warning settings.
+pub const QUOTA_WARNING_WINDOWS: [&str; 2] = ["session", "weekly"];
+
+/// One window's per-provider quota warning settings (Mac
+/// `QuotaWarningWindowConfig`). Values are *used* percentages.
+///
+/// - Global: every field is absent; the global thresholds apply.
+/// - Custom: `high` and/or `critical` is set; a missing value inherits global.
+/// - Off: `enabled == Some(false)`; saved values are kept for a later Custom.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QuotaWarningWindow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub high: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub critical: Option<f64>,
+}
+
+impl QuotaWarningWindow {
+    /// True when the window follows the global settings (nothing stored).
+    pub fn is_global(&self) -> bool {
+        self.enabled.is_none() && self.high.is_none() && self.critical.is_none()
+    }
+
+    /// Clamp stored values to 0..=100 and drop non-finite numbers.
+    pub fn normalized(self) -> Self {
+        let clamp = |value: Option<f64>| {
+            value
+                .filter(|number| number.is_finite())
+                .map(|number| number.clamp(0.0, 100.0))
+        };
+        Self {
+            enabled: self.enabled,
+            high: clamp(self.high),
+            critical: clamp(self.critical),
         }
+    }
+}
+
+/// Per-provider quota warning settings for the session and weekly windows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderQuotaWarnings {
+    #[serde(skip_serializing_if = "QuotaWarningWindow::is_global")]
+    pub session: QuotaWarningWindow,
+    #[serde(skip_serializing_if = "QuotaWarningWindow::is_global")]
+    pub weekly: QuotaWarningWindow,
+}
+
+impl ProviderQuotaWarnings {
+    pub fn is_empty(&self) -> bool {
+        self.session.is_global() && self.weekly.is_global()
+    }
+
+    pub fn window(&self, window: &str) -> Option<&QuotaWarningWindow> {
+        match window {
+            "session" => Some(&self.session),
+            "weekly" => Some(&self.weekly),
+            _ => None,
+        }
+    }
+
+    pub fn window_mut(&mut self, window: &str) -> Option<&mut QuotaWarningWindow> {
+        match window {
+            "session" => Some(&mut self.session),
+            "weekly" => Some(&mut self.weekly),
+            _ => None,
+        }
+    }
+
+    pub fn normalized(self) -> Self {
+        Self {
+            session: self.session.normalized(),
+            weekly: self.weekly.normalized(),
+        }
+    }
+}
+
+/// Migration #5: fold legacy `provider_usage_thresholds` entries
+/// (`<provider>` and `<provider>:<window>`) into
+/// `provider_configs.<provider>.quota_warnings`.
+///
+/// Per field, the window key wins over the provider key; a value neither key
+/// sets stays absent and keeps inheriting the global threshold. A window that
+/// already has new-format settings is left untouched.
+pub(super) fn migrate_legacy_usage_thresholds(
+    provider_configs: &mut HashMap<ProviderId, ProviderConfig>,
+    legacy: HashMap<String, UsageThresholdOverride>,
+) {
+    let known = crate::core::cli_name_map();
+    let legacy = normalize_usage_threshold_overrides(legacy);
+    let mut providers: Vec<(&str, ProviderId)> = legacy
+        .keys()
+        .filter_map(|key| {
+            let provider = key.split_once(':').map_or(key.as_str(), |(p, _)| p);
+            known.get(provider).map(|id| (provider, *id))
+        })
+        .collect();
+    providers.sort_unstable_by_key(|(provider, _)| *provider);
+    providers.dedup();
+    for (provider_key, provider_id) in providers {
+        let provider_override = legacy.get(provider_key);
+        for window in QUOTA_WARNING_WINDOWS {
+            let window_override = legacy.get(&format!("{provider_key}:{window}"));
+            let high = window_override
+                .and_then(|value| value.high)
+                .or_else(|| provider_override.and_then(|value| value.high));
+            let critical = window_override
+                .and_then(|value| value.critical)
+                .or_else(|| provider_override.and_then(|value| value.critical));
+            if high.is_none() && critical.is_none() {
+                continue;
+            }
+            let config = provider_configs.entry(provider_id).or_default();
+            let Some(target) = config.quota_warnings.window_mut(window) else {
+                continue;
+            };
+            if target.is_global() {
+                target.high = high;
+                target.critical = critical;
+            }
+        }
+    }
+}
+
+impl Settings {
+    fn quota_warning_window(&self, provider: ProviderId, window: &str) -> QuotaWarningWindow {
+        self.provider_configs
+            .get(&provider)
+            .and_then(|config| config.quota_warnings.window(window))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Effective warning thresholds (*used* %) for one provider window:
+    /// the provider's Custom value, else the global threshold.
+    pub fn usage_thresholds(&self, provider: ProviderId, window: &str) -> UsageThresholds {
+        let custom = self.quota_warning_window(provider, window);
+        UsageThresholds {
+            high: custom.high.unwrap_or(self.high_usage_threshold),
+            critical: custom.critical.unwrap_or(self.critical_usage_threshold),
+        }
+    }
+
+    /// False when the provider window's quota warnings are set to Off. Off
+    /// suppresses threshold notifications and bar markers. Threshold hooks
+    /// still fire at the window's thresholds, as on macOS, where quota hooks
+    /// are independent of the notification preferences.
+    pub fn quota_warning_enabled(&self, provider: ProviderId, window: &str) -> bool {
+        self.quota_warning_window(provider, window)
+            .enabled
+            .unwrap_or(true)
+    }
+
+    pub fn quota_warnings(&self, provider: ProviderId) -> ProviderQuotaWarnings {
+        self.provider_configs
+            .get(&provider)
+            .map(|config| config.quota_warnings)
+            .unwrap_or_default()
+    }
+
+    pub fn set_quota_warnings(&mut self, provider: ProviderId, value: ProviderQuotaWarnings) {
+        self.provider_config_mut(provider).quota_warnings = value.normalized();
     }
 }
 
@@ -291,8 +440,8 @@ impl TrayIconMode {
 }
 
 /// Metric preference for display in tray and UI
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(try_from = "String", into = "String")]
 pub enum MetricPreference {
     #[default]
     Automatic,
@@ -301,28 +450,100 @@ pub enum MetricPreference {
     Model,
     Tertiary,
     Credits,
-    #[serde(rename = "extraUsage", alias = "extrausage")]
     ExtraUsage,
     /// The provider's monthly plan allowance window, such as Mistral's Vibe
-    /// plan (upstream 0.70.0 #4072).
+    /// plan (upstream 0.70.0 #4072). Written camelCase like the bridge; files
+    /// saved with the old lowercase spelling still load.
     MonthlyPlan,
     Average,
+    /// The latest reported Tokens/min (upstream 0.75.0 #4495). A text metric:
+    /// the tray meter keeps the Automatic lane while the tray status shows the rate.
+    TokensPerMinute,
+    /// One provider-declared named extra allowance, keyed by its extra rate
+    /// window id (upstream 0.73.0 #4269). Persisted as `extra:<window id>`.
+    /// The id is kept even when the provider no longer declares it, so a
+    /// saved choice survives a provider that temporarily stops offering it.
+    NamedExtra(String),
 }
 
+const NAMED_EXTRA_KEY_PREFIX: &str = "extra:";
+
+static ALL_STANDARD_METRICS: [MetricPreference; 10] = [
+    MetricPreference::Automatic,
+    MetricPreference::Session,
+    MetricPreference::Weekly,
+    MetricPreference::Model,
+    MetricPreference::Tertiary,
+    MetricPreference::Credits,
+    MetricPreference::ExtraUsage,
+    MetricPreference::MonthlyPlan,
+    MetricPreference::Average,
+    MetricPreference::TokensPerMinute,
+];
+
 impl MetricPreference {
-    /// Get all available metric preferences
+    /// Every provider-independent metric preference. Named extra allowances
+    /// are declared per provider and are not listed here.
     pub fn all() -> &'static [MetricPreference] {
-        &[
-            MetricPreference::Automatic,
-            MetricPreference::Session,
-            MetricPreference::Weekly,
-            MetricPreference::Model,
-            MetricPreference::Tertiary,
-            MetricPreference::Credits,
-            MetricPreference::ExtraUsage,
-            MetricPreference::MonthlyPlan,
-            MetricPreference::Average,
-        ]
+        &ALL_STANDARD_METRICS
+    }
+
+    /// The persisted and bridge spelling (`automatic`, `extraUsage`,
+    /// `extra:<window id>`, ...).
+    pub fn key(&self) -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(match self {
+            MetricPreference::Automatic => "automatic",
+            MetricPreference::Session => "session",
+            MetricPreference::Weekly => "weekly",
+            MetricPreference::Model => "model",
+            MetricPreference::Tertiary => "tertiary",
+            MetricPreference::Credits => "credits",
+            MetricPreference::ExtraUsage => "extraUsage",
+            MetricPreference::MonthlyPlan => "monthlyPlan",
+            MetricPreference::Average => "average",
+            MetricPreference::TokensPerMinute => "tokensPerMinute",
+            MetricPreference::NamedExtra(id) => {
+                return std::borrow::Cow::Owned(format!("{NAMED_EXTRA_KEY_PREFIX}{id}"));
+            }
+        })
+    }
+
+    /// Parse [`Self::key`], also accepting the legacy lowercase spellings.
+    pub fn from_key(key: &str) -> Option<Self> {
+        if let Some(id) = key.strip_prefix(NAMED_EXTRA_KEY_PREFIX) {
+            let id = id.trim();
+            return (!id.is_empty()).then(|| MetricPreference::NamedExtra(id.to_string()));
+        }
+        Some(match key {
+            "automatic" => MetricPreference::Automatic,
+            "session" => MetricPreference::Session,
+            "weekly" => MetricPreference::Weekly,
+            "model" => MetricPreference::Model,
+            "tertiary" => MetricPreference::Tertiary,
+            "credits" => MetricPreference::Credits,
+            "extraUsage" | "extrausage" => MetricPreference::ExtraUsage,
+            "monthlyPlan" | "monthlyplan" => MetricPreference::MonthlyPlan,
+            "average" => MetricPreference::Average,
+            "tokensPerMinute" | "tokensperminute" => MetricPreference::TokensPerMinute,
+            _ => return None,
+        })
+    }
+
+    /// Whether `provider` can take this choice: a named extra only for the
+    /// provider that declares that window id; every other metric always.
+    pub fn is_declared_for(&self, provider: ProviderId) -> bool {
+        match self {
+            MetricPreference::NamedExtra(id) => provider.named_extra_metric(id).is_some(),
+            _ => true,
+        }
+    }
+
+    /// The selected named extra window id, when this is a named extra choice.
+    pub fn named_extra_id(&self) -> Option<&str> {
+        match self {
+            MetricPreference::NamedExtra(id) => Some(id),
+            _ => None,
+        }
     }
 
     /// Get the display name for this metric
@@ -337,6 +558,8 @@ impl MetricPreference {
             MetricPreference::ExtraUsage => "Extra usage",
             MetricPreference::MonthlyPlan => "Monthly plan",
             MetricPreference::Average => "Average",
+            MetricPreference::TokensPerMinute => "Tokens/min",
+            MetricPreference::NamedExtra(_) => "Named allowance",
         }
     }
 
@@ -352,7 +575,23 @@ impl MetricPreference {
             MetricPreference::ExtraUsage => "On-demand or extra usage budget",
             MetricPreference::MonthlyPlan => "Monthly plan allowance",
             MetricPreference::Average => "Average across metrics",
+            MetricPreference::TokensPerMinute => "Latest tokens per minute",
+            MetricPreference::NamedExtra(_) => "A provider-named extra allowance",
         }
+    }
+}
+
+impl TryFrom<String> for MetricPreference {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::from_key(&value).ok_or_else(|| format!("unknown metric preference `{value}`"))
+    }
+}
+
+impl From<MetricPreference> for String {
+    fn from(value: MetricPreference) -> Self {
+        value.key().into_owned()
     }
 }
 
@@ -418,6 +657,17 @@ pub struct ProviderConfig {
     /// Codex-only: enable historical usage tracking in UI.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub historical_tracking: bool,
+    /// Codex-only: keep a local session cost ledger (Mac Options parity;
+    /// persisted only, no Windows consumer yet).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_session_cost_ledger_enabled: bool,
+    /// Codex-only: OpenAI web battery saver, shown while web extras is on
+    /// (Mac Options parity; persisted only, no Windows consumer yet).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub openai_web_battery_saver_enabled: bool,
+    /// Per-window quota warning settings (Global, Custom or Off).
+    #[serde(default, skip_serializing_if = "ProviderQuotaWarnings::is_empty")]
+    pub quota_warnings: ProviderQuotaWarnings,
     /// Claude-only: avoid keychain prompts when reading credentials.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub avoid_keychain_prompts: bool,
@@ -426,9 +676,19 @@ pub struct ProviderConfig {
     /// claude-swap credentials (issue #477).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub claude_swap_enabled: bool,
+    /// Claude-only: with the Automatic cookie source, read the claude.ai
+    /// session only from the Claude desktop app's cookie store instead of
+    /// browsers. Disabled by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_desktop_cookies_enabled: bool,
     /// Claude-only: path to the claude-swap (`cswap`) executable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_swap_executable_path: Option<String>,
+    /// Claude-only: which tool the executable path names (`"tcr"`). Unset or
+    /// unknown reads as claude-swap, and claude-swap is stored as unset so the
+    /// file stays readable by builds without tcr.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_swap_source: Option<String>,
     /// Codex/Claude-only: reopen the captured CLI session after its quota resets.
     /// Disabled by default; the desktop shell never injects a prompt.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -446,4 +706,93 @@ pub struct ProviderConfig {
     /// publish this denominator; it is only used when a valid value is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_credit_entitlement: Option<f64>,
+    /// OpenAI API-only: `Some(false)` opts out of the per-refresh Tokens/min fetch.
+    /// `None` keeps upstream's default of on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_usage_enabled: Option<bool>,
+    /// OpenAI API-only: manual per-model organization rate limits for Live Usage
+    /// headroom. Validated on load; `None` when no valid row is stored.
+    #[serde(
+        default,
+        deserialize_with = "super::model_rate_limits::deserialize_model_rate_limits",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub model_rate_limits: Option<Vec<super::ModelRateLimit>>,
+}
+
+/// How the single tray icon is drawn (Mac "Menu bar style").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuBarIconStyle {
+    /// Two-row usage meter.
+    #[default]
+    Bars,
+    /// Provider icon plus the percent text.
+    Percent,
+    /// Session and weekly meters drawn as two equal-height rows (upstream
+    /// "Progress bars stacked", #4436). Older builds read it as `Bars`.
+    #[serde(rename = "stackedBars")]
+    StackedBars,
+}
+
+impl MenuBarIconStyle {
+    /// Lenient parse; unknown values return `None` so callers pick a fallback.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "bars" => Some(Self::Bars),
+            "percent" => Some(Self::Percent),
+            "stackedbars" => Some(Self::StackedBars),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bars => "bars",
+            Self::Percent => "percent",
+            Self::StackedBars => "stackedBars",
+        }
+    }
+}
+
+/// How workday boundaries appear on weekly usage bars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkdayTickStyle {
+    Hidden,
+    #[default]
+    Subtle,
+    HighContrast,
+}
+
+impl WorkdayTickStyle {
+    /// Lenient parse; accepts `high_contrast` and `highContrast`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "hidden" => Some(Self::Hidden),
+            "subtle" => Some(Self::Subtle),
+            "high_contrast" | "highcontrast" => Some(Self::HighContrast),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hidden => "hidden",
+            Self::Subtle => "subtle",
+            Self::HighContrast => "high_contrast",
+        }
+    }
+}
+
+/// Most providers the merged Overview can show (Mac `overviewProviderLimit`).
+pub const MERGED_OVERVIEW_PROVIDER_LIMIT: usize = 6;
+
+/// Highest accepted `weekly_progress_work_days` value.
+pub const WEEKLY_PROGRESS_WORK_DAYS_MAX: u8 = 7;
+
+/// Normalise a work-week length: `Some(2..=7)` passes, anything else is
+/// `None` (Automatic, wall-clock pacing).
+pub fn normalize_weekly_progress_work_days(value: Option<u8>) -> Option<u8> {
+    value.filter(|days| (2..=WEEKLY_PROGRESS_WORK_DAYS_MAX).contains(days))
 }

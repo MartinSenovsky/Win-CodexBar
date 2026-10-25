@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use codexbar::core::{
-    AdaptiveRefreshInput, AdaptiveRefreshReason, ThermalPressure, next_delay as adaptive_next_delay,
+    AdaptiveRefreshInput, AdaptiveRefreshReason, CODING_ACTIVITY_THRESHOLD, ThermalPressure,
+    next_delay as adaptive_next_delay,
 };
 use codexbar::settings::Settings;
 
@@ -32,6 +33,19 @@ pub fn note_coding_activity() {
         .get_or_init(|| Mutex::new(None))
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+}
+
+/// Record coding activity that happened `age` ago, such as a Codex rollout's mtime. Keeps the
+/// newer of the existing and new instants so an older rollout cannot shorten recent activity.
+fn note_coding_activity_age(age: Duration) {
+    let at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+    let mut slot = LAST_CODING_ACTIVITY
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if slot.is_none_or(|previous| at > previous) {
+        *slot = Some(at);
+    }
 }
 
 fn age_since(slot: &OnceLock<Mutex<Option<Instant>>>) -> Option<Duration> {
@@ -83,13 +97,33 @@ pub fn install(app: tauri::AppHandle) {
             } else {
                 auto_resume_schedule = None;
             }
-            // Sample coding-agent processes on each poll while Adaptive is on
-            // so delays can drop to the 5m coding-activity cap without waiting
-            // for a refresh tick.
-            if ADAPTIVE_ACTIVE.load(Ordering::Relaxed)
-                && crate::coding_activity::coding_agent_process_active()
-            {
-                note_coding_activity();
+            // Sample coding activity on each poll while Adaptive is on so delays
+            // can drop to the 5m coding-activity cap without waiting for a refresh
+            // tick. A live agent process is the strongest signal. Without one, a
+            // recent Codex rollout mtime also counts (upstream #4156). It is skipped
+            // under Low Power, matching the Adaptive power floor.
+            if ADAPTIVE_ACTIVE.load(Ordering::Relaxed) {
+                if crate::coding_activity::coding_agent_process_active() {
+                    note_coding_activity();
+                } else if !settings
+                    .low_power_mode_preference
+                    .resolve(system_battery_saver_enabled())
+                {
+                    // The rollout walk touches the disk, so it runs off the async runtime.
+                    match tokio::task::spawn_blocking(|| {
+                        crate::coding_activity::codex_rollout_recently_modified(
+                            CODING_ACTIVITY_THRESHOLD,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Some(age)) => note_coding_activity_age(age),
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!("Codex rollout activity scan failed: {error}");
+                        }
+                    }
+                }
             }
             tokio::time::sleep(AUTO_REFRESH_POLL_INTERVAL).await;
         }
@@ -214,6 +248,10 @@ fn auto_resume_scheduled_at(
 }
 
 fn local_usage_provider_ids(settings: &Settings) -> Vec<String> {
+    // "Track costs" off: no background local cost-log scan.
+    if !settings.cost_usage_enabled {
+        return Vec::new();
+    }
     settings
         .get_enabled_provider_ids()
         .into_iter()
@@ -311,6 +349,7 @@ mod tests {
         let mut settings = Settings {
             enabled_providers: ["codex".to_string()].into_iter().collect(),
             refresh_interval_secs: 300,
+            adaptive_refresh: false,
             ..Default::default()
         };
         settings.set_auto_resume_after_quota_reset(ProviderId::Codex, true);
@@ -456,6 +495,18 @@ mod tests {
             settings.enabled_providers.clear();
             assert!(local_usage_provider_ids(&settings).is_empty());
         }
+    }
+
+    #[test]
+    fn local_usage_refresh_skips_every_provider_when_cost_tracking_is_off() {
+        let settings = Settings {
+            cost_usage_enabled: false,
+            enabled_providers: ["codex".to_string(), "claude".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        assert!(local_usage_provider_ids(&settings).is_empty());
     }
 
     #[test]

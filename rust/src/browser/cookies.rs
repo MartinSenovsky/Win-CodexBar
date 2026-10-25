@@ -3,11 +3,6 @@
 //! Chromium browsers store cookies in an SQLite database encrypted with DPAPI.
 //! Firefox stores cookies in an unencrypted SQLite database.
 
-#![allow(
-    dead_code,
-    reason = "the cookie API surface is shared across providers and cfg-split Windows/WSLS code paths, so individual helpers are reached only from their own browser/provider callers"
-)]
-
 use std::path::Path;
 
 use aes_gcm::{
@@ -19,6 +14,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 use super::detection::{BrowserProfile, BrowserType, DetectedBrowser};
+use super::session_scan::BrowserCookieScan;
 
 /// Errors that can occur during cookie extraction
 #[derive(Debug, Error)]
@@ -49,12 +45,54 @@ pub enum CookieError {
     /// after the ABE migration. Modern Chromium-based browsers can write these cookies
     /// with a `v20` prefix; older migrated profiles can also fail every AES-GCM decrypt
     /// while exposing `app_bound_encrypted_key` in Local State.
-    #[error(
-        "Chromium App-Bound Encryption is blocking automatic browser import. \
-             Paste the Cookie header manually, or use Firefox if that browser has the same login."
-    )]
-    AppBoundEncryption,
+    ///
+    /// `browsers` names the browsers ABE blocked, in scan order without repeats.
+    /// A single browser read reports its own browser; a scan that finds nothing
+    /// merges every blocked browser it saw. An empty list means the browser was
+    /// not attributed (only the raw per-cookie decrypt reports that).
+    #[error("{}", app_bound_encryption_message(.browsers))]
+    AppBoundEncryption { browsers: Vec<BrowserType> },
 }
+
+/// Display text for [`CookieError::AppBoundEncryption`]. Names the blocked
+/// browsers so a multi-browser failure says which imports to work around.
+fn app_bound_encryption_message(browsers: &[BrowserType]) -> String {
+    if browsers.is_empty() {
+        return "Chromium App-Bound Encryption is blocking automatic browser import. \
+                Paste the Cookie header manually, or use Firefox if that browser has the same login."
+            .to_string();
+    }
+    let names: Vec<&str> = browsers
+        .iter()
+        .map(|browser| browser.display_name())
+        .collect();
+    let list = join_names(&names);
+    if browsers.len() == 1 {
+        format!(
+            "Chromium App-Bound Encryption blocked automatic import from {list}. \
+             Paste the Cookie header manually, or use Firefox if that browser has the same login."
+        )
+    } else {
+        format!(
+            "Chromium App-Bound Encryption blocked automatic import from {list}. \
+             Paste the Cookie header manually, or sign in with Firefox instead."
+        )
+    }
+}
+
+/// Join display names as "A", "A and B", or "A, B and C".
+fn join_names(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Only the app that wrote App-Bound (`v20`) cookies can decrypt them, so a
+/// browser session or a pasted header is the only way to reuse that sign-in.
+pub const CLAUDE_DESKTOP_APP_BOUND_MESSAGE: &str = "The Claude desktop app protects its cookies with App-Bound Encryption, so CodexBar can't read its sign-in. \
+     Import cookies from a browser signed in to claude.ai, or paste the Cookie header manually.";
 
 impl CookieError {
     /// Format a browser-specific message for UI surfaces that know which browser
@@ -62,7 +100,10 @@ impl CookieError {
     /// concrete browser instead of implying the problem only affects Chrome/Edge.
     pub fn user_message_for_browser(&self, browser_type: BrowserType) -> String {
         match self {
-            Self::AppBoundEncryption => format!(
+            Self::AppBoundEncryption { .. } if browser_type == BrowserType::ClaudeDesktop => {
+                CLAUDE_DESKTOP_APP_BOUND_MESSAGE.to_string()
+            }
+            Self::AppBoundEncryption { .. } => format!(
                 "{} is using Chromium App-Bound Encryption, which is blocking automatic cookie import for this profile. \
                  Paste the Cookie header manually, or use Firefox if that browser has the same login.",
                 browser_type.display_name()
@@ -91,6 +132,46 @@ impl Cookie {
     }
 }
 
+/// The cookies a browser sends with a request to `host`, for sites whose
+/// session cookies live on a parent domain shared with unrelated sites.
+///
+/// A plain domain read returns the domain and every subdomain, so reading the
+/// parent (`google.com`) would also pick up cookies for unrelated sibling
+/// hosts. The scope reads `scan_domain` and keeps only cookies stored for
+/// `host` itself or for one of its parent domains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CookieRequestScope {
+    /// Domain whose cookie rows are read (the host or one of its parents).
+    pub scan_domain: &'static str,
+    /// Host the request goes to.
+    pub host: &'static str,
+}
+
+impl CookieRequestScope {
+    /// Whether a cookie stored under `host_key` is sent to the scope's host.
+    ///
+    /// A leading dot marks a domain cookie, which a browser sends to the
+    /// domain and its subdomains. Without the dot the cookie is host-only and
+    /// is sent only on an exact host match, so a cookie stored as
+    /// `google.com` must not leak to `gemini.google.com`.
+    pub fn applies_to(&self, host_key: &str) -> bool {
+        let host = self.host.to_ascii_lowercase();
+        let trimmed = host_key.trim();
+        if let Some(dotted) = trimmed.strip_prefix('.') {
+            let domain = dotted.trim_end_matches('.').to_ascii_lowercase();
+            !domain.is_empty() && (host == domain || host.ends_with(&format!(".{domain}")))
+        } else {
+            let stored = trimmed.trim_end_matches('.').to_ascii_lowercase();
+            !stored.is_empty() && host == stored
+        }
+    }
+
+    /// Keep only the cookies sent to the scope's host.
+    pub fn retain(&self, cookies: &mut Vec<Cookie>) {
+        cookies.retain(|cookie| self.applies_to(&cookie.domain));
+    }
+}
+
 /// Cookie extractor for browsers
 pub struct CookieExtractor;
 
@@ -108,14 +189,16 @@ impl CookieExtractor {
         for profile in &browser.profiles {
             match Self::extract_profile_cookies(browser, profile, domain) {
                 Ok(cookies) => all_cookies.extend(cookies),
-                Err(CookieError::AppBoundEncryption) => {
+                Err(CookieError::AppBoundEncryption { .. }) => {
                     tracing::debug!(
                         "App-Bound Encryption blocked profile {}: {}",
                         profile.name,
                         browser.browser_type.display_name()
                     );
                     if abe_error.is_none() {
-                        abe_error = Some(CookieError::AppBoundEncryption);
+                        abe_error = Some(CookieError::AppBoundEncryption {
+                            browsers: vec![browser.browser_type],
+                        });
                     }
                 }
                 Err(e) => {
@@ -251,7 +334,7 @@ impl CookieExtractor {
                 // Decrypt the cookie value
                 let value = match Self::decrypt_chromium_cookie(&encrypted_value, &encryption_key) {
                     Ok(v) => v,
-                    Err(CookieError::AppBoundEncryption) => {
+                    Err(CookieError::AppBoundEncryption { .. }) => {
                         tracing::debug!("Candidate cookie uses Chromium App-Bound Encryption");
                         decrypt_failures += 1;
                         abe_decrypt_failures += 1;
@@ -305,7 +388,9 @@ impl CookieExtractor {
                 "Chromium App-Bound Encryption (ABE) detected: all {} cookies failed to decrypt",
                 decrypt_failures
             );
-            return Err(CookieError::AppBoundEncryption);
+            return Err(CookieError::AppBoundEncryption {
+                browsers: vec![browser.browser_type],
+            });
         }
 
         Ok(cookies)
@@ -377,6 +462,7 @@ impl CookieExtractor {
                 CryptUnprotectData(&input_blob, None, None, None, None, 0, &mut output_blob);
 
             if result.is_err() {
+                crate::cli_usage_cache::note_dpapi_decrypt_failure();
                 return Err(CookieError::Dpapi(format!(
                     "CryptUnprotectData failed: {:?}",
                     result
@@ -395,6 +481,35 @@ impl CookieExtractor {
             let _ = LocalFree(HLOCAL(output_blob.pbData as *mut _));
 
             Ok(decrypted)
+        }
+    }
+
+    /// DPAPI-protect `plain` for the current user, as Chromium does for the
+    /// `os_crypt.encrypted_key` in Local State. Test fixtures only.
+    #[cfg(all(test, windows))]
+    pub(crate) fn dpapi_protect_for_tests(plain: &[u8]) -> Vec<u8> {
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData};
+
+        #[allow(clippy::cast_possible_truncation, reason = "test keys are 32 bytes")]
+        let input_blob = CRYPT_INTEGER_BLOB {
+            cbData: plain.len() as u32,
+            pbData: plain.as_ptr() as *mut u8,
+        };
+        let mut output_blob = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        // SAFETY: input_blob borrows `plain` for the call; the API-allocated
+        // output buffer is copied before LocalFree releases it.
+        unsafe {
+            CryptProtectData(&input_blob, None, None, None, None, 0, &mut output_blob)
+                .expect("CryptProtectData");
+            let protected =
+                std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize)
+                    .to_vec();
+            let _ = LocalFree(HLOCAL(output_blob.pbData as *mut _));
+            protected
         }
     }
 
@@ -435,7 +550,11 @@ impl CookieExtractor {
             // Modern Chromium-based browsers on Windows use App-Bound Encryption for these
             // cookies. Treating the blob as old DPAPI data produces a misleading
             // DPAPI or "no cookies found" error even though the user is signed in.
-            return Err(CookieError::AppBoundEncryption);
+            // The browser is not known here. extract_chromium_cookies skips the
+            // cookie and attributes the browser when it reports the failure.
+            return Err(CookieError::AppBoundEncryption {
+                browsers: Vec::new(),
+            });
         }
 
         if has_v10_prefix || has_v11_prefix {
@@ -660,112 +779,34 @@ fn domain_matches(host_key: &str, domain: &str) -> bool {
     host == domain || host == format!(".{domain}") || host.ends_with(&format!(".{domain}"))
 }
 
-/// Per-browser cookies found while scanning every detected browser.
-struct BrowserCookieCandidates {
-    candidates: Vec<(BrowserType, Vec<Cookie>)>,
-    abe_error_seen: bool,
-}
-
-/// Scan every detected browser for readable cookies of `domain`.
-///
-/// Returns the per-browser candidates in detection order, ignoring browsers
-/// with no cookies, plus whether any browser was blocked by App-Bound
-/// Encryption so callers can surface that specific, actionable error when no
-/// other browser succeeded.
-fn extract_domain_candidates(domain: &str) -> Result<BrowserCookieCandidates, CookieError> {
-    use super::detection::BrowserDetector;
-
-    let browsers = BrowserDetector::detect_all();
-
-    if browsers.is_empty() {
-        return Err(CookieError::BrowserNotInstalled);
-    }
-
-    let mut candidates = Vec::new();
-    let mut abe_error_seen = false;
-
-    for browser in browsers {
-        match CookieExtractor::extract_for_domain(&browser, domain) {
-            Ok(cookies) if !cookies.is_empty() => {
-                candidates.push((browser.browser_type, cookies));
-            }
-            Ok(_) => {}
-            Err(CookieError::AppBoundEncryption) => {
-                // Chromium ABE is blocking this browser; log a warning and keep
-                // trying the remaining browsers; Firefox does not use Chromium ABE.
-                tracing::warn!(
-                    browser = %browser.browser_type.display_name(),
-                    "App-Bound Encryption prevents automatic cookie import; \
-                     trying remaining browsers"
-                );
-                abe_error_seen = true;
-            }
-            Err(error) => {
-                tracing::debug!(
-                    browser = %browser.browser_type.display_name(),
-                    "Failed to get cookies from {}: {}",
-                    browser.browser_type.display_name(),
-                    error
-                );
-            }
-        }
-    }
-
-    Ok(BrowserCookieCandidates {
-        candidates,
-        abe_error_seen,
-    })
-}
-
 /// Helper to get cookies for a specific domain from any available browser.
 ///
-/// Stops at the first browser with any matching cookie; providers that must
-/// try every browser after an auth failure use `get_cookie_headers_for_domain`.
+/// Stops at the first browser with any matching cookie and reads no further
+/// browser. Providers that validate the session and must move on after an
+/// auth failure iterate a [`BrowserCookieScan`] instead.
 pub fn get_cookies_for_domain(domain: &str) -> Result<Vec<Cookie>, CookieError> {
-    let scan = extract_domain_candidates(domain)?;
-
-    if let Some((browser, cookies)) = scan.candidates.into_iter().next() {
-        tracing::debug!(
-            "Found {} cookies for {} in {}",
-            cookies.len(),
-            domain,
-            browser.display_name()
-        );
-        return Ok(cookies);
+    let mut scan = BrowserCookieScan::new(&[domain]);
+    match scan.next() {
+        Some(candidate) => Ok(candidate.cookies),
+        None => Err(scan.exhaustion_error()),
     }
-
-    // Surface a clear ABE error if it was the only kind of failure encountered,
-    // so the UI can show an actionable message instead of a generic "not found".
-    if scan.abe_error_seen {
-        return Err(CookieError::AppBoundEncryption);
-    }
-
-    Err(CookieError::NotFound(domain.to_string()))
 }
 
 /// Get cookie-header candidates from every detected browser that has readable
 /// cookies for a domain.
 ///
-/// Providers whose session cookie is only in one browser need the complete
-/// candidate set so they can validate the session-bearing header and try the
-/// next browser after an auth failure.
+/// Reads every browser up front; prefer iterating a [`BrowserCookieScan`] so
+/// later browsers are read only when an earlier session is rejected.
 pub fn get_cookie_headers_for_domain(
     domain: &str,
 ) -> Result<Vec<(BrowserType, String)>, CookieError> {
-    let scan = extract_domain_candidates(domain)?;
-
+    let mut scan = BrowserCookieScan::new(&[domain]);
     let headers = scan
-        .candidates
-        .into_iter()
-        .map(|(browser, cookies)| (browser, CookieExtractor::build_cookie_header(&cookies)))
-        .filter(|(_, header)| !header.trim().is_empty())
+        .by_ref()
+        .map(|candidate| (candidate.browser, candidate.header()))
         .collect::<Vec<_>>();
-
-    if headers.is_empty() && scan.abe_error_seen {
-        return Err(CookieError::AppBoundEncryption);
-    }
     if headers.is_empty() {
-        return Err(CookieError::NotFound(domain.to_string()));
+        return Err(scan.exhaustion_error());
     }
     Ok(headers)
 }
@@ -776,14 +817,15 @@ pub fn get_cookie_headers_for_domain(
 pub fn get_cookies_by_browser_for_domain(
     domain: &str,
 ) -> Result<Vec<(BrowserType, Vec<Cookie>)>, CookieError> {
-    let scan = extract_domain_candidates(domain)?;
-    if scan.candidates.is_empty() && scan.abe_error_seen {
-        return Err(CookieError::AppBoundEncryption);
+    let mut scan = BrowserCookieScan::new(&[domain]);
+    let candidates = scan
+        .by_ref()
+        .map(|candidate| (candidate.browser, candidate.cookies))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Err(scan.exhaustion_error());
     }
-    if scan.candidates.is_empty() {
-        return Err(CookieError::NotFound(domain.to_string()));
-    }
-    Ok(scan.candidates)
+    Ok(candidates)
 }
 
 /// Get a cookie header string for a domain
@@ -794,40 +836,52 @@ pub fn get_cookie_header(domain: &str) -> Result<String, CookieError> {
 
 /// Get a cookie header string from the first domain that has readable cookies.
 pub fn get_cookie_header_for_domains(domains: &[&str]) -> Result<String, CookieError> {
-    let mut app_bound_encryption_seen = false;
-    let mut last_error = None;
-
-    for domain in domains {
-        match get_cookie_header(domain) {
-            Ok(header) if !header.trim().is_empty() => return Ok(header),
-            Ok(_) => {}
-            Err(CookieError::AppBoundEncryption) => app_bound_encryption_seen = true,
-            Err(error) => last_error = Some(error),
-        }
+    let mut scan = BrowserCookieScan::new(domains);
+    match scan.next() {
+        Some(candidate) => Ok(candidate.header()),
+        None => Err(scan.exhaustion_error()),
     }
-
-    if app_bound_encryption_seen {
-        Err(CookieError::AppBoundEncryption)
-    } else {
-        Err(last_error.unwrap_or_else(|| CookieError::NotFound(domains.join(", "))))
-    }
-}
-
-/// Get a cookie header string for a domain from a specific browser
-pub fn get_cookie_header_from_browser(
-    domain: &str,
-    browser: &super::detection::DetectedBrowser,
-) -> Result<String, CookieError> {
-    let cookies = CookieExtractor::extract_for_domain(browser, domain)?;
-    if cookies.is_empty() {
-        return Err(CookieError::NotFound(domain.to_string()));
-    }
-    Ok(CookieExtractor::build_cookie_header(&cookies))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_scope_keeps_host_and_dotted_parent_cookies_only() {
+        let scope = CookieRequestScope {
+            scan_domain: "example.com",
+            host: "app.example.com",
+        };
+        assert!(scope.applies_to("app.example.com"));
+        assert!(scope.applies_to(".app.example.com"));
+        assert!(scope.applies_to(".example.com"));
+        assert!(!scope.applies_to("example.com"));
+        assert!(!scope.applies_to("EXAMPLE.COM."));
+        assert!(!scope.applies_to("mail.example.com"));
+        assert!(!scope.applies_to("deep.app.example.com"));
+        assert!(!scope.applies_to("badexample.com"));
+        assert!(!scope.applies_to(""));
+    }
+
+    #[test]
+    fn host_only_cookie_is_not_sent_to_subdomains() {
+        let subdomain = CookieRequestScope {
+            scan_domain: "example.com",
+            host: "app.example.com",
+        };
+        // A host-only cookie (stored without a leading dot) is sent to the
+        // exact host only; a browser would not send it to a subdomain.
+        assert!(!subdomain.applies_to("example.com"));
+        assert!(subdomain.applies_to(".example.com"));
+
+        let exact = CookieRequestScope {
+            scan_domain: "example.com",
+            host: "example.com",
+        };
+        assert!(exact.applies_to("example.com"));
+        assert!(exact.applies_to(".example.com"));
+    }
 
     #[test]
     fn domain_matching_requires_boundary() {
@@ -839,18 +893,22 @@ mod tests {
         assert!(!domain_matches("chatgpt.com.evil.test", "chatgpt.com"));
     }
 
+    /// Manual live check against this machine's installed browsers. It reads
+    /// and decrypts real `claude.ai` cookies, so it is ignored by default and
+    /// also requires `CODEXBAR_LIVE_COOKIE_TEST=1`. Prints counts and cookie
+    /// names only, never values.
     #[test]
+    #[ignore = "reads real browser cookie stores; opt in with --ignored and CODEXBAR_LIVE_COOKIE_TEST=1"]
     fn test_cookie_extraction() {
-        // This test will only work on a machine with Chrome installed
+        if std::env::var("CODEXBAR_LIVE_COOKIE_TEST").as_deref() != Ok("1") {
+            eprintln!("skipping: set CODEXBAR_LIVE_COOKIE_TEST=1 to run the live cookie check");
+            return;
+        }
         match get_cookies_for_domain("claude.ai") {
             Ok(cookies) => {
                 println!("Found {} cookies for claude.ai", cookies.len());
                 for cookie in &cookies {
-                    println!(
-                        "  {}={}",
-                        cookie.name,
-                        &cookie.value[..20.min(cookie.value.len())]
-                    );
+                    println!("  {}", cookie.name);
                 }
             }
             Err(e) => {
@@ -862,7 +920,9 @@ mod tests {
     /// Verify that the ABE error variant formats a readable, actionable message.
     #[test]
     fn test_abe_error_display() {
-        let err = CookieError::AppBoundEncryption;
+        let err = CookieError::AppBoundEncryption {
+            browsers: vec![BrowserType::Chrome, BrowserType::Edge],
+        };
         let msg = err.to_string();
         assert!(
             msg.contains("App-Bound Encryption"),
@@ -876,11 +936,54 @@ mod tests {
             msg.contains("Paste") || msg.contains("manual"),
             "ABE error should mention manual import fallback"
         );
+        assert_eq!(
+            msg,
+            "Chromium App-Bound Encryption blocked automatic import from Google Chrome and Microsoft Edge. \
+             Paste the Cookie header manually, or sign in with Firefox instead."
+        );
+    }
+
+    /// One blocked browser keeps the singular remedy; three or more join with
+    /// commas and a final "and".
+    #[test]
+    fn test_abe_error_wording_for_one_and_three_browsers() {
+        assert_eq!(
+            CookieError::AppBoundEncryption {
+                browsers: vec![BrowserType::Chrome],
+            }
+            .to_string(),
+            "Chromium App-Bound Encryption blocked automatic import from Google Chrome. \
+             Paste the Cookie header manually, or use Firefox if that browser has the same login."
+        );
+        assert_eq!(
+            CookieError::AppBoundEncryption {
+                browsers: vec![BrowserType::Chrome, BrowserType::Edge, BrowserType::Arc,],
+            }
+            .to_string(),
+            "Chromium App-Bound Encryption blocked automatic import from Google Chrome, \
+             Microsoft Edge and Arc. Paste the Cookie header manually, or sign in with Firefox instead."
+        );
+    }
+
+    /// An unattributed ABE error keeps the generic wording rather than naming nobody.
+    #[test]
+    fn test_abe_error_without_browser_uses_generic_message() {
+        let msg = CookieError::AppBoundEncryption {
+            browsers: Vec::new(),
+        }
+        .to_string();
+        assert!(
+            msg.starts_with("Chromium App-Bound Encryption is blocking automatic browser import.")
+        );
+        assert!(msg.contains("Paste the Cookie header manually"));
     }
 
     #[test]
     fn test_abe_error_names_selected_brave_browser() {
-        let msg = CookieError::AppBoundEncryption.user_message_for_browser(BrowserType::Brave);
+        let msg = CookieError::AppBoundEncryption {
+            browsers: vec![BrowserType::Brave],
+        }
+        .user_message_for_browser(BrowserType::Brave);
         assert!(msg.contains("Brave"), "ABE error should name Brave");
         assert!(
             msg.contains("Chromium App-Bound Encryption"),
@@ -904,7 +1007,7 @@ mod tests {
             .expect_err("v20 cookies should report App-Bound Encryption");
 
         assert!(
-            matches!(err, CookieError::AppBoundEncryption),
+            matches!(err, CookieError::AppBoundEncryption { .. }),
             "expected AppBoundEncryption, got {err:?}"
         );
     }

@@ -63,7 +63,11 @@ function AppInner() {
   const [error, setError] = useState<string | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>("dark");
 
-  useTheme(themePreference);
+  // Settings follows the Windows app theme under `auto`; the other surfaces
+  // keep the pinned-Dark media query.
+  useTheme(themePreference, {
+    followSystem: isSettingsWindow() || surface.mode === "settings",
+  });
   useDeepSeekPricingStatus();
 
   const reloadBootstrapState = useCallback(
@@ -220,13 +224,14 @@ function SettingsLayout({ state }: { state: BootstrapState }) {
 }
 
 function DetachedSettingsApp({ state }: { state: BootstrapState }) {
-  const [tab, setTab] = useState(initialSettingsTab);
+  const [request, setRequest] = useState(() => ({ tab: initialSettingsTab(), id: 0 }));
 
   useEffect(() => {
     // Listen for tab-change events from Rust (when the window is re-focused
-    // with a different tab request).
+    // with a different tab request). Each event gets a new id so repeating
+    // the same `providers:<id>` deep link selects that provider again.
     const unlisten = listen<string>("settings-change-tab", (event) => {
-      setTab(event.payload);
+      setRequest((current) => ({ tab: event.payload, id: current.id + 1 }));
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -236,7 +241,7 @@ function DetachedSettingsApp({ state }: { state: BootstrapState }) {
   return (
     <Suspense fallback={<SurfaceFallback />}>
       <main className="settings-surface settings-surface--full">
-        <Settings state={state} initialTab={tab} />
+        <Settings state={state} initialTab={request.tab} tabRequestId={request.id} />
       </main>
     </Suspense>
   );
